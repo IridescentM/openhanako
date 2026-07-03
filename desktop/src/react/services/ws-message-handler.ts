@@ -693,6 +693,18 @@ export function handleServerMessage(msg: any): void {
         }
         break;
       }
+      // 防止重复追加：如果已有相同 id 或相同 text+timestamp 的用户消息，跳过
+      const existingSession = sessionScopedValue(useStore.getState(), useStore.getState().chatSessions, sp);
+      const alreadyExists = existingSession?.items?.some(item =>
+        item.type === 'message' &&
+        item.data.role === 'user' &&
+        (item.data.id === data.id ||
+         (item.data.text === data.text &&
+          Math.abs((item.data.timestamp || 0) - (data.timestamp || 0)) < 5000))
+      );
+      if (alreadyExists) {
+        break;
+      }
       useStore.getState().appendItem(sp, { type: 'message', data });
       bumpMessageLiveVersion(sp);
       if (sp === useStore.getState().currentSessionPath) {

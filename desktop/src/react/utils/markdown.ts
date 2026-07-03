@@ -1074,8 +1074,26 @@ export function getPreviewMd(): MarkdownItInstance {
   return _previewMd;
 }
 
+// Chromium on macOS 无法渲染 Apple Color Emoji（上游 bug：chromium/issues/948676）
+// 用 Twemoji SVG 图片替换 emoji 字符，确保在所有环境下可见
+const EMOJI_REGEX = /\p{Extended_Pictographic}/gu;
+const EMOJI_VARIATION_SELECTOR = /[\uFE0F\u200D]/g;
+
+function replaceEmojiWithImages(html: string): string {
+  // 只替换文本节点中的 emoji，不替换 HTML 标签和属性
+  // 简单方案：在生成的 HTML 上做全局替换，emoji 字符不会出现在标签名或属性值中
+  return html.replace(EMOJI_REGEX, (match) => {
+    // 获取 emoji 的 codepoint，用 Twemoji 的命名规则
+    const codepoints = Array.from(match)
+      .map(ch => ch.codePointAt(0)!.toString(16))
+      .join('-');
+    return `<img src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/${codepoints}.svg" alt="${match}" style="display:inline-block;width:1.2em;height:1.2em;vertical-align:middle;" loading="lazy" />`;
+  });
+}
+
 export function renderMarkdown(src: string): string {
-  return getMd().render(src, buildMarkdownEnv(src));
+  const html = getMd().render(src, buildMarkdownEnv(src));
+  return replaceEmojiWithImages(html);
 }
 
 export function renderMarkdownPreview(src: string, options: MarkdownPreviewOptions = {}): string {

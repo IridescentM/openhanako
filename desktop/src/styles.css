@@ -71,8 +71,8 @@
     --fs-hint:    0.7rem;    /* 提示、元数据、tag、badge */
 
     /* 字体默认值：主题 CSS 可 override */
-    --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-    --font-serif: 'EB Garamond', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', serif;
+    --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Apple Color Emoji', sans-serif;
+    --font-serif: 'EB Garamond', 'Apple Color Emoji', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 
     /* 编辑器默认排版：用户设置写入同名变量，主题仍可覆盖初始值 */

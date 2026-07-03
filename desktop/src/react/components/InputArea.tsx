@@ -1385,7 +1385,9 @@ function InputAreaInner({ surface }: Required<InputAreaProps>) {
   }, [editor, fileMentionRange, inputLocked]);
 
   // ── Send / interject message ──
+  const submitGuardRef = useRef(false);
   const submitEditorMessage = useCallback(async (type: 'prompt' | 'interject') => {
+    if (submitGuardRef.current) return;
     if (inputLocked) return;
     if (!editor) return;
     const editorJson = editor.getJSON();
@@ -1426,6 +1428,7 @@ function InputAreaInner({ surface }: Required<InputAreaProps>) {
       )) return;
     }
     setSending(true);
+    submitGuardRef.current = true;
 
     try {
       if (pendingNewSession) {
@@ -1668,6 +1671,7 @@ function InputAreaInner({ surface }: Required<InputAreaProps>) {
         throw err;
       }
     } finally {
+      submitGuardRef.current = false;
       setSending(false);
     }
   }, [editor, inputLocked, attachedFiles, docContextAttached, connected, isStreaming, sending, pendingNewSession, currentDoc, clearAttachedFiles, clearDraft, currentSessionPath, setDocContextAttached, slashCommands, slashSelected, handleSlashSelect, supportsVision, currentModelInfo, loadVisionAuxiliaryConfig, modelSwitching, t]);
