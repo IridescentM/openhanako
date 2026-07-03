@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { AppTitlebar } from '../components/app/AppTitlebar';
 import { ChatPage } from '../components/app/ChatPage';
@@ -9,10 +9,12 @@ import { ToastContainer } from '../components/ToastContainer';
 import { toggleSidebar } from '../components/SidebarLayout';
 import { toggleJianSidebar } from '../stores/desk-actions';
 import { togglePreviewPanel } from '../stores/preview-actions';
+import { openSettingsModal } from '../stores/settings-modal-actions';
 import { useStore } from '../stores';
-import { createNewSession } from '../stores/session-actions';
+import { createNewSession, reconcileCurrentSessionMessages } from '../stores/session-actions';
 import {
   initializeMobileRuntime,
+  loadMobileSessions,
   readMobileAuthSession,
   type MobilePrincipal,
 } from './mobile-init';
@@ -24,10 +26,19 @@ const MOBILE_EDGE_GESTURE_WIDTH = 28;
 const MOBILE_EDGE_GESTURE_MIN_DISTANCE = 56;
 const MOBILE_EDGE_GESTURE_MAX_VERTICAL_DRIFT = 80;
 const MOBILE_EDGE_GESTURE_DOMINANCE = 1.25;
+const MOBILE_UPDATE_AVAILABLE_EVENT = 'hana-mobile-update-available';
+const MOBILE_APPLY_UPDATE_EVENT = 'hana-mobile-apply-update';
+const DEFAULT_MOBILE_AUTH_LOCALE = 'zh-CN';
 
 const LazyPreviewPanel = lazy(() => import('../components/PreviewPanel').then(module => ({ default: module.PreviewPanel })));
 const LazyMediaViewer = lazy(() => import('../components/shared/MediaViewer/MediaViewer').then(module => ({ default: module.MediaViewer })));
 const LazyWorkspaceCompanionRail = lazy(() => import('../components/app/WorkspaceCompanionRail').then(module => ({ default: module.WorkspaceCompanionRail })));
+const LazySettingsModalShell = lazy(() => import('../components/SettingsModalShell').then(module => ({ default: module.SettingsModalShell })));
+
+let mobileAuthLocaleLoad: {
+  i18n: typeof window.i18n;
+  promise: Promise<void>;
+} | null = null;
 
 type MobileEdgeGesture = {
   edge: 'left' | 'right';
@@ -44,8 +55,10 @@ export function MobileApp(): React.ReactElement {
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [mobileUpdateAvailable, setMobileUpdateAvailable] = useState(() => window.__hanaMobileUpdateAvailable === true);
 
   const bootstrap = useCallback(async () => {
+    await ensureMobileAuthLocale();
     const session = await readMobileAuthSession();
     if (!session.authenticated || !session.principal) {
       setAuthState('login');
@@ -54,7 +67,7 @@ export function MobileApp(): React.ReactElement {
     if (!principalHasRequiredScopes(session.principal, MOBILE_REQUIRED_SCOPES)) {
       await apiJson('/api/web-auth/logout', { method: 'POST' }).catch(() => null);
       setPrincipal(null);
-      setLoginError('当前登录缺少工作台权限，请重新输入访问密钥。');
+      setLoginError((window.t ?? ((p: string) => p))('mobile.auth.scopeError'));
       setAuthState('login');
       return;
     }
@@ -74,6 +87,20 @@ export function MobileApp(): React.ReactElement {
     };
   }, [bootstrap]);
 
+  useEffect(() => {
+    const handleUpdateAvailable = () => {
+      window.__hanaMobileUpdateAvailable = true;
+      setMobileUpdateAvailable(true);
+    };
+    if (window.__hanaMobileUpdateAvailable === true) setMobileUpdateAvailable(true);
+    window.addEventListener(MOBILE_UPDATE_AVAILABLE_EVENT, handleUpdateAvailable);
+    return () => window.removeEventListener(MOBILE_UPDATE_AVAILABLE_EVENT, handleUpdateAvailable);
+  }, []);
+
+  const applyMobileUpdate = useCallback(() => {
+    window.dispatchEvent(new Event(MOBILE_APPLY_UPDATE_EVENT));
+  }, []);
+
   const login = async (event: React.FormEvent) => {
     event.preventDefault();
     setLoginError(null);
@@ -89,7 +116,7 @@ export function MobileApp(): React.ReactElement {
       setLoginPassword('');
       await bootstrap();
     } catch (err) {
-      setLoginError(err instanceof Error ? err.message : '登录失败');
+      setLoginError(err instanceof Error ? err.message : (window.t ?? ((p: string) => p))('mobile.auth.loginFailed'));
     }
   };
 
@@ -116,31 +143,93 @@ export function MobileApp(): React.ReactElement {
 
   return (
     <ErrorBoundary region="mobile">
-      <MobileDesktopShell principal={principal} />
+      <MobileDesktopShell
+        principal={principal}
+        mobileUpdateAvailable={mobileUpdateAvailable}
+        onApplyMobileUpdate={applyMobileUpdate}
+      />
     </ErrorBoundary>
   );
 }
 
 function MobileDesktopShell({
   principal,
+  mobileUpdateAvailable,
+  onApplyMobileUpdate,
 }: {
   principal: MobilePrincipal | null;
+  mobileUpdateAvailable: boolean;
+  onApplyMobileUpdate: () => void;
 }) {
   const sidebarOpen = useStore(s => s.sidebarOpen);
   const jianOpen = useStore(s => s.jianOpen);
   const previewOpen = useStore(s => s.previewOpen);
   const mediaViewer = useStore(s => s.mediaViewer);
   const currentTab = useStore(s => s.currentTab);
+  const sessions = useStore(s => s.sessions);
+  const currentSessionPath = useStore(s => s.currentSessionPath);
+  const pendingNewSession = useStore(s => s.pendingNewSession);
+  const wsState = useStore(s => s.wsState);
   const isNarrow = useNarrowMobileViewport();
   const edgeGestureRef = useRef<MobileEdgeGesture | null>(null);
+  const previousWsStateRef = useRef(wsState);
+  const t = window.t ?? ((p: string) => p);
+
+  const titlebarTitle = useMemo(() => {
+    if (pendingNewSession) return t('sidebar.newChat');
+    const currentSession = sessions.find(session => session.path === currentSessionPath);
+    return currentSession?.title || currentSession?.firstMessage || t('session.untitled');
+  }, [currentSessionPath, pendingNewSession, sessions, t]);
 
   useEffect(() => {
     useStore.setState({ currentTab: 'chat' });
   }, []);
 
   useEffect(() => {
-    if (isNarrow) useStore.setState({ sidebarOpen: false, jianOpen: false });
+    if (isNarrow) useStore.setState({ sidebarOpen: false, jianOpen: false, previewOpen: false });
   }, [isNarrow]);
+
+  useEffect(() => {
+    const unsubscribe = window.platform?.onOpenSettingsModal?.((tab?: string) => {
+      openSettingsModal(tab);
+    });
+    return typeof unsubscribe === 'function' ? unsubscribe : undefined;
+  }, []);
+
+  const refreshMobileSessions = useCallback(() => {
+    void loadMobileSessions()
+      .then(() => {
+        // 列表已新鲜：校验当前打开会话的修订点，补拉后台窗口
+        // （锁屏 / WS 断连期间 Bridge /rc 等）漏掉的消息（issue #1610）。
+        void reconcileCurrentSessionMessages('mobile_foreground_refresh');
+      })
+      .catch((err) => {
+        console.warn('[mobile] refresh sessions failed', err);
+      });
+  }, []);
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'hidden') return;
+      refreshMobileSessions();
+    };
+    window.addEventListener('focus', refreshWhenVisible);
+    window.addEventListener('online', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', refreshWhenVisible);
+      window.removeEventListener('online', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [refreshMobileSessions]);
+
+  useEffect(() => {
+    const previous = previousWsStateRef.current;
+    previousWsStateRef.current = wsState;
+    if (wsState === 'connected' && previous && previous !== 'connected') {
+      refreshMobileSessions();
+    }
+  }, [refreshMobileSessions, wsState]);
 
   const showDrawerScrim = (sidebarOpen || jianOpen) && isNarrow;
   const openMobileDrawerFromGesture = useCallback((edge: MobileEdgeGesture['edge']) => {
@@ -230,8 +319,11 @@ function MobileDesktopShell({
         jianOpen={jianOpen}
         previewOpen={previewOpen}
         showPreviewToggle
+        showNewSessionButton
         showChannelTabs={false}
         showWidgetButtons={false}
+        centerTitle={titlebarTitle}
+        onNewSession={() => void createNewSession()}
         onToggleSidebar={() => {
           if (!sidebarOpen) useStore.setState({ jianOpen: false });
           toggleSidebar(!sidebarOpen);
@@ -245,6 +337,12 @@ function MobileDesktopShell({
           togglePreviewPanel();
         }}
       />
+      {mobileUpdateAvailable && (
+        <div className="mobile-update-banner" role="status">
+          <span>{t('mobile.update.available')}</span>
+          <button type="button" onClick={onApplyMobileUpdate}>{t('mobile.update.reload')}</button>
+        </div>
+      )}
       <div className="app mobile-desktop-app">
         <ChatSidebar
           open={sidebarOpen && currentTab === 'chat'}
@@ -269,8 +367,11 @@ function MobileDesktopShell({
           </Suspense>
         )}
       </div>
-      {showDrawerScrim && <button className="mobile-drawer-scrim" type="button" aria-label="关闭侧边栏" onClick={closeMobileDrawers} />}
+      {showDrawerScrim && <button className="mobile-drawer-scrim" type="button" aria-label={t('mobile.closeSidebar')} onClick={closeMobileDrawers} />}
       <StatusBar />
+      <Suspense fallback={null}>
+        <LazySettingsModalShell />
+      </Suspense>
       {mediaViewer && (
         <Suspense fallback={null}>
           <LazyMediaViewer />
@@ -291,12 +392,13 @@ function WorkspaceCompanionRailFallback({ open }: { open: boolean }) {
 }
 
 function MobileLoadingScreen() {
+  const t = window.t ?? ((p: string) => p);
   return (
     <main className="onboarding">
       <section className="onboarding-step active">
         <img className="onboarding-avatar" src="./icon.png" alt="" />
-        <h1 className="onboarding-title">Hana Mobile</h1>
-        <p className="onboarding-subtitle">正在连接 Hana...</p>
+        <h1 className="onboarding-title">HanaAgent</h1>
+        <p className="onboarding-subtitle">{t('mobile.loading')}</p>
       </section>
     </main>
   );
@@ -325,6 +427,7 @@ function MobileLoginScreen({
   onPasswordChange: (value: string) => void;
   onSubmit: (event: React.FormEvent) => void;
 }) {
+  const t = window.t ?? ((p: string) => p);
   const loginDisabled = mode === 'device'
     ? !secret.trim()
     : !username.trim() || !password;
@@ -333,42 +436,42 @@ function MobileLoginScreen({
     <main className="onboarding">
       <form className="onboarding-step active" onSubmit={onSubmit}>
         <img className="onboarding-avatar" src="./icon.png" alt="" />
-        <h1 className="onboarding-title">手机访问 Hana</h1>
+        <h1 className="onboarding-title">{t('mobile.auth.title')}</h1>
         <p className="onboarding-subtitle">{mode === 'device'
-          ? '输入桌面端为这台设备生成的访问密钥。登录后会改用 HttpOnly 会话 cookie。'
-          : '使用桌面端设置的本地账号登录。局域网明文 HTTP 会被服务器拒绝，请使用本机、HTTPS 或可信 Tunnel。'}</p>
+          ? t('mobile.auth.deviceHelp')
+          : t('mobile.auth.passwordHelp')}</p>
 
-        <div className="provider-grid" role="tablist" aria-label="登录方式">
+        <div className="provider-grid" role="tablist" aria-label={t('mobile.auth.tabLabel')}>
           <button type="button" role="tab" aria-selected={mode === 'device'} className={`provider-card${mode === 'device' ? ' selected' : ''}`} onClick={() => onModeChange('device')}>
-            访问密钥
+            {t('mobile.auth.deviceTab')}
           </button>
           <button type="button" role="tab" aria-selected={mode === 'password'} className={`provider-card${mode === 'password' ? ' selected' : ''}`} onClick={() => onModeChange('password')}>
-            用户名密码
+            {t('mobile.auth.passwordTab')}
           </button>
         </div>
 
         {mode === 'device' ? (
           <label className="custom-field">
-            <span className="ob-field-label">访问密钥</span>
+            <span className="ob-field-label">{t('mobile.auth.deviceField')}</span>
             <input className="ob-input" value={secret} onChange={(event) => onSecretChange(event.target.value)} autoComplete="one-time-code" spellCheck={false} />
           </label>
         ) : (
           <>
             <label className="custom-field">
-              <span className="ob-field-label">用户名</span>
+              <span className="ob-field-label">{t('mobile.auth.usernameField')}</span>
               <input className="ob-input" value={username} onChange={(event) => onUsernameChange(event.target.value)} autoComplete="username" spellCheck={false} />
             </label>
             <label className="custom-field">
-              <span className="ob-field-label">密码</span>
+              <span className="ob-field-label">{t('mobile.auth.passwordField')}</span>
               <input className="ob-input" value={password} onChange={(event) => onPasswordChange(event.target.value)} type="password" autoComplete="current-password" />
             </label>
-            <p className="onboarding-subtitle">远程明文链路不接收账号密码，避免把长期凭证暴露在局域网或 Tunnel 中。</p>
+            <p className="onboarding-subtitle">{t('mobile.auth.plaintextWarning')}</p>
           </>
         )}
 
         {error && <div className="ob-status error">{error}</div>}
         <div className="onboarding-actions">
-          <button className="ob-btn ob-btn-primary" type="submit" disabled={loginDisabled}>登录</button>
+          <button className="ob-btn ob-btn-primary" type="submit" disabled={loginDisabled}>{t('mobile.auth.submit')}</button>
         </div>
       </form>
     </main>
@@ -393,6 +496,30 @@ function scopeAllows(scopes: string[], required: string): boolean {
   if (scopes.includes(required)) return true;
   const [namespace] = required.split('.');
   return scopes.includes(namespace) || scopes.includes(`${namespace}.*`);
+}
+
+function ensureMobileAuthLocale(): Promise<void> {
+  const i18n = window.i18n;
+  if (!i18n?.load) return Promise.resolve();
+  if (mobileAuthLocaleLoad?.i18n === i18n) return mobileAuthLocaleLoad.promise;
+
+  const promise = i18n.load(resolveInitialMobileAuthLocale())
+    .catch((err) => {
+      if (mobileAuthLocaleLoad?.i18n === i18n) mobileAuthLocaleLoad = null;
+      console.warn('[mobile] initial auth locale load failed', err);
+    })
+    .then(() => {
+      if (window.i18n?.locale) {
+        useStore.setState({ locale: window.i18n.locale });
+      }
+    });
+  mobileAuthLocaleLoad = { i18n, promise };
+  return promise;
+}
+
+function resolveInitialMobileAuthLocale(): string {
+  const htmlLocale = document.documentElement.lang.trim();
+  return htmlLocale || DEFAULT_MOBILE_AUTH_LOCALE;
 }
 
 function useNarrowMobileViewport(): boolean {

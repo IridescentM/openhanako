@@ -2,20 +2,22 @@
  * MarkdownContent — 渲染预处理好的 markdown HTML
  *
  * 用 dangerouslySetInnerHTML 设置内容，
- * useEffect 注入代码块复制按钮。
+ * 在渲染前补齐代码块工具栏，并用根事件代理处理工具栏交互。
  */
 
-import { memo, useRef, useEffect, useLayoutEffect } from 'react';
-import { injectCopyButtons } from '../../utils/format';
+import { memo, useCallback, useMemo, useRef, useLayoutEffect, useState, type MouseEvent } from 'react';
+import { renderCodeBlockToolbarHtml, type CodeBlockToolbarLabels } from '../../utils/format';
 import { useMermaidDiagrams } from '../../hooks/use-mermaid-diagrams';
 import { splitGraphemes } from '../../utils/grapheme';
-import { openFilePreview } from '../../utils/file-preview';
+import { openInternalLink, resolveLinkTarget, type LinkOpenContext } from '../../utils/link-open';
+import { LinkContextMenu, type LinkContextMenuState } from '../shared/LinkContextMenu';
 import styles from './Chat.module.css';
 
 interface Props {
   html: string;
   className?: string;
   tailFadeCount?: number;
+  linkContext?: LinkOpenContext;
 }
 
 function shouldSkipTailFadeNode(node: Text): boolean {
@@ -24,7 +26,9 @@ function shouldSkipTailFadeNode(node: Text): boolean {
 }
 
 function clearTailFade(root: HTMLElement): void {
-  const tailSpans = Array.from(root.querySelectorAll<HTMLElement>('[data-stream-tail-char="true"]'));
+  const tailSpans = Array.from(root.querySelectorAll<HTMLElement>(
+    '[data-stream-tail-char="true"], [data-stream-tail-chunk="true"]'
+  ));
   for (const span of tailSpans) {
     span.replaceWith(document.createTextNode(span.textContent || ''));
   }
@@ -57,93 +61,147 @@ function applyTailFade(root: HTMLElement, count: number): void {
     remaining -= take;
   }
 
-  let index = 0;
   for (const item of tailNodes.reverse()) {
     const splitAt = item.segments.length - item.take;
     const before = item.segments.slice(0, splitAt).join('');
-    const tail = item.segments.slice(splitAt);
+    const tail = item.segments.slice(splitAt).join('');
     const fragment = document.createDocumentFragment();
     if (before) fragment.appendChild(document.createTextNode(before));
-    for (const segment of tail) {
+    if (tail) {
       // eslint-disable-next-line no-restricted-syntax -- post-render markdown stream tail decoration needs DOM text-node surgery
       const span = document.createElement('span');
-      span.className = styles.streamTailChar;
-      span.dataset.streamTailChar = 'true';
-      span.style.setProperty('--stream-tail-index', String(index));
-      span.textContent = segment;
+      span.className = styles.streamTailChunk;
+      span.dataset.streamTailChunk = 'true';
+      span.textContent = tail;
       fragment.appendChild(span);
-      index += 1;
     }
     item.node.parentNode?.replaceChild(fragment, item.node);
   }
 }
 
-export const MarkdownContent = memo(function MarkdownContent({ html, className, tailFadeCount = 0 }: Props) {
+function codeBlockToolbarLabels(): CodeBlockToolbarLabels {
+  const t = window.t ?? ((p: string) => p);
+  return {
+    wordWrap: t('codeBlock.wordWrap'),
+    copy: t('attach.copy'),
+    copied: t('attach.copied'),
+  };
+}
+
+export const MarkdownContent = memo(function MarkdownContent({ html, className, tailFadeCount = 0, linkContext }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  const [linkMenu, setLinkMenu] = useState<LinkContextMenuState | null>(null);
   const classes = className ? `md-content ${className}` : 'md-content';
+  const toolbarLabels = useMemo(() => codeBlockToolbarLabels(), []);
+  const renderedHtml = useMemo(() => renderCodeBlockToolbarHtml(html, toolbarLabels), [
+    html,
+    toolbarLabels,
+  ]);
+
+  const findAnchor = useCallback((event: MouseEvent): HTMLAnchorElement | null => {
+    const root = ref.current;
+    const target = event.target;
+    if (!root || !(target instanceof Element)) return null;
+    const anchor = target.closest<HTMLAnchorElement>('a[href]');
+    if (!anchor || !root.contains(anchor)) return null;
+    return anchor;
+  }, []);
+
+  const handleCodeBlockToolbarClick = useCallback((event: MouseEvent): boolean => {
+    const root = ref.current;
+    const target = event.target;
+    if (!root || !(target instanceof Element)) return false;
+
+    const button = target.closest<HTMLButtonElement>('button[data-code-block-action]');
+    if (!button || !root.contains(button)) return false;
+
+    const wrapper = button.closest<HTMLElement>('.code-block-wrap');
+    if (!wrapper || !root.contains(wrapper)) return false;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (button.dataset.codeBlockAction === 'wrap') {
+      const active = wrapper.dataset.wrap === 'true';
+      wrapper.dataset.wrap = active ? 'false' : 'true';
+      button.dataset.active = active ? 'false' : 'true';
+      button.setAttribute('aria-pressed', active ? 'false' : 'true');
+      return true;
+    }
+
+    if (button.dataset.codeBlockAction === 'copy') {
+      const pre = wrapper.querySelector('pre');
+      const code = pre?.querySelector('code');
+      const text = code ? code.textContent : pre?.textContent;
+      const copyPromise = navigator.clipboard?.writeText?.(text || '');
+      void copyPromise?.then(() => {
+        button.dataset.copied = 'true';
+        button.title = toolbarLabels.copied;
+        button.setAttribute('aria-label', toolbarLabels.copied);
+        setTimeout(() => {
+          button.dataset.copied = 'false';
+          button.title = toolbarLabels.copy;
+          button.setAttribute('aria-label', toolbarLabels.copy);
+        }, 1500);
+      });
+      return true;
+    }
+
+    return false;
+  }, [toolbarLabels.copy, toolbarLabels.copied]);
+
+  const handleClick = useCallback((event: MouseEvent) => {
+    if (handleCodeBlockToolbarClick(event)) return;
+    const anchor = findAnchor(event);
+    if (!anchor) return;
+    const href = anchor.getAttribute('href') || '';
+    const context = {
+      ...linkContext,
+      label: anchor.textContent?.trim() || linkContext?.label,
+    };
+    if (resolveLinkTarget(href, context).kind === 'anchor') return;
+    event.preventDefault();
+    event.stopPropagation();
+    void openInternalLink(href, context);
+  }, [findAnchor, handleCodeBlockToolbarClick, linkContext]);
+
+  const handleContextMenu = useCallback((event: MouseEvent) => {
+    const anchor = findAnchor(event);
+    if (!anchor) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setLinkMenu({
+      href: anchor.getAttribute('href') || '',
+      context: {
+        ...linkContext,
+        label: anchor.textContent?.trim() || linkContext?.label,
+      },
+      position: { x: event.clientX, y: event.clientY },
+    });
+  }, [findAnchor, linkContext]);
 
   useLayoutEffect(() => {
     if (!ref.current) return;
     applyTailFade(ref.current, tailFadeCount);
-  }, [html, tailFadeCount]);
+  }, [renderedHtml, tailFadeCount]);
 
-  useEffect(() => {
-    if (!ref.current) return;
-    injectCopyButtons(ref.current);
-  }, [html]);
-  useMermaidDiagrams(ref, [html]);
-
-  // 处理文件链接点击：file:// 协议或无协议的文件路径用文件预览打开
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      const anchor = target.closest('a');
-      if (!anchor) return;
-      const href = anchor.getAttribute('href');
-      if (!href) return;
-
-      // file:// 协议链接 → 用文件预览打开
-      if (href.startsWith('file://')) {
-        e.preventDefault();
-        e.stopPropagation();
-        const filePath = decodeURIComponent(href.replace(/^file:\/\//, ''));
-        if (filePath) {
-          const parts = filePath.split('/');
-          const fileName = parts[parts.length - 1] || filePath;
-          const dotIdx = fileName.lastIndexOf('.');
-          const ext = dotIdx >= 0 ? fileName.slice(dotIdx + 1) : '';
-          openFilePreview(filePath, fileName, ext);
-        }
-        return;
-      }
-
-      // 无协议的文件路径链接（如 DEPLOYMENT.md、/docs/PRD.md）→ 用文件预览打开
-      // linkify 会把文本中的文件路径转成 <a> 标签，href 可能是相对路径或绝对路径
-      if (!href.includes('://') && !href.startsWith('#')) {
-        e.preventDefault();
-        e.stopPropagation();
-        // 尝试解析为项目内文件路径
-        const filePath = decodeURIComponent(href);
-        if (filePath) {
-          const parts = filePath.split('/');
-          const fileName = parts[parts.length - 1] || filePath;
-          const dotIdx = fileName.lastIndexOf('.');
-          const ext = dotIdx >= 0 ? fileName.slice(dotIdx + 1) : '';
-          openFilePreview(filePath, fileName, ext);
-        }
-      }
-    };
-    el.addEventListener('click', handler);
-    return () => el.removeEventListener('click', handler);
-  }, [html]);
+  useMermaidDiagrams(ref, [renderedHtml]);
 
   return (
-    <div
-      ref={ref}
-      className={classes}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <>
+      <div
+        ref={ref}
+        className={classes}
+        onClick={handleClick}
+        onContextMenu={handleContextMenu}
+        dangerouslySetInnerHTML={{ __html: renderedHtml }}
+      />
+      {linkMenu && (
+        <LinkContextMenu
+          state={linkMenu}
+          onClose={() => setLinkMenu(null)}
+        />
+      )}
+    </>
   );
 });

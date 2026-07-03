@@ -1,20 +1,37 @@
-import type { PreviewItem } from '../types';
+import type {
+  FileVersion,
+  PreviewItem,
+  RemoteWorkbenchContentRef,
+  VersionedWriteResult,
+} from '../types';
 import type { DeskFile } from '../types';
 import type { FileRef } from '../types/file-ref';
 import { hanaFetch } from '../hooks/use-hana-fetch';
-import { openPreview } from '../stores/preview-actions';
+import { openPreview, upsertPreviewItem } from '../stores/preview-actions';
 import { useStore } from '../stores';
 import { resolveServerConnection } from '../services/server-connection';
+import {
+  encodeWorkbenchContentPath,
+  resolveFileRefPreviewAccess,
+  resolveWorkbenchFilePreviewAccess,
+} from '../services/resource-access';
 import { resolveFileRefUrl } from '../services/resource-url';
 import { BINARY_PREVIEW_TYPES, PREVIEWABLE_EXTS, openFilePreview } from './file-preview';
 import { extOfName, inferKindByExt, isMediaKind } from './file-kind';
 import { openMediaViewerForRef } from './open-media-viewer';
 import { showError } from './ui-helpers';
+import { isWebRuntime } from './platform-runtime';
+
+export { isWebRuntime };
 
 export interface WorkbenchPreviewInput {
   file: DeskFile;
-  rootId?: string;
+  mountId?: string | null;
+  rootId?: string | null;
   subdir: string;
+  localRootPath?: string | null;
+  nativeRootPath?: string | null;
+  preferNativePath?: boolean;
 }
 
 export interface FileRefPreviewContext {
@@ -28,29 +45,51 @@ function getErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function isWebRuntime(): boolean {
-  return typeof document !== 'undefined'
-    && document.documentElement.getAttribute('data-platform') === 'web';
+export { encodeWorkbenchContentPath };
+
+export function isRemoteWorkbenchContentRef(value: unknown): value is RemoteWorkbenchContentRef {
+  if (!isRecord(value)) return false;
+  return (value.kind === 'workbench-file' || value.kind === 'mobile-workbench')
+    && (typeof value.mountId === 'string' || typeof value.rootId === 'string')
+    && typeof value.subdir === 'string'
+    && typeof value.name === 'string';
 }
 
-function encodeWorkbenchContentPath({
-  rootId = 'default',
-  subdir,
-  name,
-}: {
-  rootId?: string;
-  subdir: string;
-  name: string;
-}): string {
-  const params = new URLSearchParams();
-  params.set('rootId', rootId || 'default');
-  params.set('subdir', subdir || '');
-  params.set('name', name);
-  return `/api/mobile/workbench/content?${params.toString()}`;
+export function normalizeWorkbenchContentRef(ref: RemoteWorkbenchContentRef): RemoteWorkbenchContentRef {
+  const mountId = ref.mountId || ref.rootId || 'default';
+  return {
+    ...ref,
+    kind: 'workbench-file',
+    mountId,
+    rootId: ref.rootId || mountId,
+    subdir: ref.subdir || '',
+    name: ref.name,
+  };
 }
 
 function previewId(prefix: string, key: string): string {
   return `${prefix}-${encodeURIComponent(key)}`;
+}
+
+function appendCacheBustQuery(path: string, attempt: number): string {
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}v=${encodeURIComponent(`${Date.now()}-${attempt}`)}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function normalizeFileVersion(value: unknown): FileVersion | null {
+  if (!isRecord(value)) return null;
+  const mtimeMs = Number(value.mtimeMs);
+  const size = Number(value.size);
+  if (!Number.isFinite(mtimeMs) || !Number.isFinite(size)) return null;
+  return {
+    mtimeMs,
+    size,
+    sha256: typeof value.sha256 === 'string' ? value.sha256 : undefined,
+  };
 }
 
 async function blobToBase64(blob: Blob): Promise<string> {
@@ -64,12 +103,84 @@ async function blobToBase64(blob: Blob): Promise<string> {
   return btoa(binary);
 }
 
-async function readContentForPreview(contentPath: string, previewType: string): Promise<string> {
-  const res = await hanaFetch(contentPath);
-  if (BINARY_PREVIEW_TYPES.has(previewType)) {
-    return blobToBase64(await res.blob());
+interface PreviewContentSnapshot {
+  content: string;
+  fileVersion?: FileVersion;
+}
+
+function fileVersionFromContentHeaders(headers: Headers): FileVersion | undefined {
+  const mtimeMs = Number(headers.get('X-Hana-File-MtimeMs'));
+  const size = Number(headers.get('X-Hana-File-Size'));
+  if (!Number.isFinite(mtimeMs) || !Number.isFinite(size)) return undefined;
+  return { mtimeMs, size };
+}
+
+function newestKnownFileVersion(
+  ...versions: Array<FileVersion | null | undefined>
+): FileVersion | undefined {
+  let newest: FileVersion | undefined;
+  for (const version of versions) {
+    if (!version || !Number.isFinite(version.mtimeMs) || !Number.isFinite(version.size)) continue;
+    if (!newest || version.mtimeMs > newest.mtimeMs) {
+      newest = version;
+      continue;
+    }
+    if (version.mtimeMs === newest.mtimeMs && version.size > newest.size) newest = version;
   }
-  return res.text();
+  return newest;
+}
+
+function remoteContentRefWithVersion(
+  ref: RemoteWorkbenchContentRef | undefined,
+  version: FileVersion | undefined,
+): RemoteWorkbenchContentRef | undefined {
+  if (!ref) return ref;
+  return {
+    ...ref,
+    version,
+  };
+}
+
+async function readContentForPreview(contentPath: string, previewType: string): Promise<PreviewContentSnapshot> {
+  const res = await hanaFetch(contentPath);
+  const fileVersion = fileVersionFromContentHeaders(res.headers);
+  let content: string;
+  if (BINARY_PREVIEW_TYPES.has(previewType)) {
+    content = await blobToBase64(await res.blob());
+  } else {
+    content = await res.text();
+  }
+  return { content, fileVersion };
+}
+
+const REMOTE_REFRESH_RETRY_DELAYS_MS = [80, 240, 600] as const;
+
+export interface RemoteWorkbenchRefreshOptions {
+  retryMissing?: boolean;
+  retryUnchanged?: boolean;
+  retryDelaysMs?: readonly number[];
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
+}
+
+async function readRemotePreviewContentWithRetry(
+  contentPath: string,
+  item: PreviewItem,
+  options: RemoteWorkbenchRefreshOptions,
+): Promise<PreviewContentSnapshot> {
+  const retryDelaysMs = options.retryDelaysMs ?? REMOTE_REFRESH_RETRY_DELAYS_MS;
+  let lastRead: PreviewContentSnapshot = { content: '' };
+  for (let attempt = 0; ; attempt += 1) {
+    const nextRead = await readContentForPreview(appendCacheBustQuery(contentPath, attempt), item.type);
+    const canRetry = attempt < retryDelaysMs.length;
+    const shouldRetryUnchanged = options.retryUnchanged && nextRead.content === item.content;
+    if (!canRetry || !shouldRetryUnchanged) return nextRead;
+    lastRead = nextRead;
+    await delay(retryDelaysMs[attempt] ?? 0);
+  }
+  return lastRead;
 }
 
 async function openRemoteContentPreview({
@@ -79,6 +190,7 @@ async function openRemoteContentPreview({
   ext,
   mediaRef,
   mediaContext,
+  remoteContentRef,
 }: {
   contentPath: string;
   id: string;
@@ -86,6 +198,7 @@ async function openRemoteContentPreview({
   ext: string;
   mediaRef?: FileRef;
   mediaContext: { origin: 'desk' | 'session'; sessionPath?: string };
+  remoteContentRef?: RemoteWorkbenchContentRef;
 }): Promise<void> {
   const mediaKind = inferKindByExt(ext);
   if (isMediaKind(mediaKind) && mediaRef) {
@@ -95,15 +208,18 @@ async function openRemoteContentPreview({
 
   const previewType = PREVIEWABLE_EXTS[ext];
   if (previewType && previewType !== 'docx' && previewType !== 'xlsx') {
-    const content = await readContentForPreview(contentPath, previewType);
+    const read = await readContentForPreview(contentPath, previewType);
+    const fileVersion = read.fileVersion;
     const previewItem: PreviewItem = {
       id,
       type: previewType,
       title,
-      content,
+      content: read.content,
       ext,
       language: previewType === 'code' ? ext : undefined,
       storageKind: 'remote-content',
+      fileVersion,
+      remoteContentRef: remoteContentRefWithVersion(remoteContentRef, fileVersion),
     };
     openPreview(previewItem);
     return;
@@ -116,47 +232,135 @@ async function openRemoteContentPreview({
     content: '',
     ext,
     storageKind: 'remote-content',
+    remoteContentRef,
   });
 }
 
-export async function openMobileWorkbenchPreview(input: WorkbenchPreviewInput): Promise<void> {
+export async function saveRemoteWorkbenchContent(
+  ref: RemoteWorkbenchContentRef,
+  content: string,
+  expectedVersion?: FileVersion | null,
+): Promise<VersionedWriteResult> {
+  const normalized = normalizeWorkbenchContentRef(ref);
+  const res = await hanaFetch('/api/workbench/actions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'writeText',
+      mountId: normalized.mountId || 'default',
+      subdir: normalized.subdir || '',
+      name: normalized.name,
+      content,
+      expectedVersion: expectedVersion ?? null,
+    }),
+  });
+  const data: unknown = await res.json();
+  if (!isRecord(data)) throw new Error('invalid remote write response');
+  return {
+    ok: data.ok === true,
+    conflict: data.conflict === true,
+    version: normalizeFileVersion(data.version),
+  };
+}
+
+function refsPointToSameWorkbenchFile(
+  left: RemoteWorkbenchContentRef | null | undefined,
+  right: RemoteWorkbenchContentRef,
+): boolean {
+  if (!isRemoteWorkbenchContentRef(left)) return false;
+  const normalizedLeft = normalizeWorkbenchContentRef(left);
+  const normalizedRight = normalizeWorkbenchContentRef(right);
+  return (normalizedLeft.mountId || 'default') === (normalizedRight.mountId || 'default')
+    && (normalizedLeft.subdir || '') === (normalizedRight.subdir || '')
+    && normalizedLeft.name === normalizedRight.name;
+}
+
+export async function refreshPreviewItemsFromRemoteWorkbenchTarget(
+  target: RemoteWorkbenchContentRef,
+  options: RemoteWorkbenchRefreshOptions = {},
+): Promise<void> {
+  const normalized = normalizeWorkbenchContentRef(target);
+  const state = useStore.getState();
+  const matching = (state.previewItems || []).filter(item =>
+    refsPointToSameWorkbenchFile(item.remoteContentRef, normalized));
+  for (const item of matching) {
+    const contentPath = item.remoteContentRef?.contentPath || encodeWorkbenchContentPath(normalized);
+    const read = await readRemotePreviewContentWithRetry(contentPath, item, options);
+    const nextVersion = newestKnownFileVersion(
+      read.fileVersion,
+      item.fileVersion,
+      normalized.version ?? undefined,
+      item.remoteContentRef?.version ?? undefined,
+    );
+    const remoteContentRef = item.remoteContentRef
+      ? {
+          ...item.remoteContentRef,
+          version: nextVersion,
+        }
+      : item.remoteContentRef;
+    upsertPreviewItem({
+      ...item,
+      content: read.content,
+      fileVersion: nextVersion,
+      remoteContentRef,
+      status: 'available',
+      missingAt: null,
+    });
+  }
+}
+
+export async function openWorkbenchFilePreview(input: WorkbenchPreviewInput): Promise<void> {
   if (input.file.isDir) return;
   const name = input.file.name;
-  const ext = extOfName(name) || '';
-  const rootId = input.rootId || 'default';
-  const contentPath = encodeWorkbenchContentPath({ rootId, subdir: input.subdir, name });
   const connection = resolveServerConnection(useStore.getState());
+  const access = resolveWorkbenchFilePreviewAccess(input, { connection }, {
+    preferNativePath: input.preferNativePath,
+  });
+  if (access.mode === 'unsupported') return;
+  if (access.mode === 'native-path') {
+    await openFilePreview(access.path, name, access.ext, {
+      origin: 'desk',
+      sourceRootPath: access.sourceRootPath,
+    });
+    return;
+  }
   const studioId = connection?.studioId || 'default';
-  const mediaKind = inferKindByExt(ext);
+  const mediaKind = inferKindByExt(access.ext);
   const mediaRef: FileRef | undefined = isMediaKind(mediaKind)
     ? {
-        id: `workbench:${rootId}:${input.subdir}:${name}`,
+        id: `workbench:${access.mountId}:${access.subdir}:${name}`,
         kind: mediaKind,
         source: 'desk',
         name,
         path: '',
-        ext,
+        ext: access.ext,
+        version: access.version,
         resource: {
-          resourceId: `workbench:${rootId}:${input.subdir}:${name}`,
+          resourceId: `workbench:${access.mountId}:${access.subdir}:${name}`,
           studioId,
-          links: { self: contentPath, content: contentPath },
+          links: { self: access.contentPath, content: access.contentPath },
         },
       }
     : undefined;
 
   try {
     await openRemoteContentPreview({
-      contentPath,
-      id: previewId('workbench', `${rootId}:${input.subdir}:${name}`),
+      contentPath: access.versionedContentPath,
+      id: previewId('workbench', `${access.mountId}:${access.subdir}:${name}`),
       title: name,
-      ext,
+      ext: access.ext,
       mediaRef,
       mediaContext: { origin: 'desk' },
+      remoteContentRef: access.remoteContentRef,
     });
   } catch (err) {
     console.error('[remote-preview] workbench preview failed:', err);
     showError(getErrorMessage(err));
   }
+}
+
+export async function openMobileWorkbenchPreview(input: WorkbenchPreviewInput): Promise<void> {
+  await openWorkbenchFilePreview(input);
 }
 
 export async function openFileRefPreview(file: FileRef, context: FileRefPreviewContext): Promise<void> {
@@ -169,8 +373,10 @@ export async function openFileRefPreview(file: FileRef, context: FileRefPreviewC
     return;
   }
 
-  if (!isWebRuntime() && file.path) {
-    await openFilePreview(file.path, file.name, file.ext || extOfName(file.name) || '', {
+  const connection = resolveServerConnection(useStore.getState());
+  const access = resolveFileRefPreviewAccess(file, { connection });
+  if (access.mode === 'native-path') {
+    await openFilePreview(access.path, file.name, file.ext || extOfName(file.name) || '', {
       origin: context.origin,
       sessionPath: context.sessionPath,
       messageId: context.messageId,
@@ -179,14 +385,12 @@ export async function openFileRefPreview(file: FileRef, context: FileRefPreviewC
     });
     return;
   }
-
-  const contentPath = file.resource?.links.content;
-  if (!contentPath) return;
+  if (access.mode !== 'resource-content') return;
 
   try {
     await openRemoteContentPreview({
-      contentPath,
-      id: previewId('resource', file.resource?.resourceId || file.id),
+      contentPath: access.contentPath,
+      id: previewId('resource', access.resourceId),
       title: file.name,
       ext: file.ext || extOfName(file.name) || '',
       mediaContext: {

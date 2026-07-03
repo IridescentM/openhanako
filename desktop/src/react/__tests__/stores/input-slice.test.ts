@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createInputSlice, type InputSlice } from '../../stores/input-slice';
 
-type SliceState = InputSlice & { currentSessionPath?: string | null };
+type SliceState = InputSlice & {
+  currentSessionId?: string | null;
+  currentSessionPath?: string | null;
+  sessions?: Array<{ sessionId?: string | null; path?: string | null }>;
+  sessionLocatorsById?: Record<string, { path: string | null }>;
+};
 
 function makeSlice(initial?: Partial<SliceState>): SliceState {
   let state: SliceState;
@@ -15,35 +20,43 @@ function makeSlice(initial?: Partial<SliceState>): SliceState {
   });
 }
 
-describe('input-slice quotedSelection', () => {
+describe('input-slice quoted selections', () => {
   let slice: SliceState;
   beforeEach(() => { slice = makeSlice(); });
 
-  it('初始状态 quotedSelection 为 null', () => {
-    expect(slice.quotedSelection).toBeNull();
+  it('初始状态没有候选选区和已加入引用', () => {
+    expect(slice.quoteCandidate).toBeNull();
+    expect(slice.quotedSelections).toEqual([]);
   });
-  it('setQuotedSelection 设置引用', () => {
+  it('setQuoteCandidate 设置悬浮引用候选，不加入引用列表', () => {
     const sel = {
       text: '玻色子',
       sourceTitle: '百科全书',
+      sourceKind: 'preview',
       sourceFilePath: '/path/to/file.md',
       lineStart: 12,
       lineEnd: 15,
       charCount: 128,
-    };
-    slice.setQuotedSelection(sel);
-    expect(slice.quotedSelection).toEqual(sel);
+    } as const;
+    slice.setQuoteCandidate(sel);
+    expect(slice.quoteCandidate).toEqual(sel);
+    expect(slice.quotedSelections).toEqual([]);
   });
-  it('clearQuotedSelection 清除引用', () => {
-    slice.setQuotedSelection({ text: 'test', sourceTitle: 'title', charCount: 4 });
-    slice.clearQuotedSelection();
-    expect(slice.quotedSelection).toBeNull();
+  it('addQuotedSelection 追加多个独立引用', () => {
+    slice.addQuotedSelection({ text: 'old', sourceTitle: 'A', sourceKind: 'preview', charCount: 3 });
+    slice.addQuotedSelection({ text: 'new', sourceTitle: 'B', sourceKind: 'chat', charCount: 3 });
+    expect(slice.quotedSelections.map(sel => sel.text)).toEqual(['old', 'new']);
   });
-  it('setQuotedSelection 覆盖旧值', () => {
-    slice.setQuotedSelection({ text: 'old', sourceTitle: 'A', charCount: 3 });
-    slice.setQuotedSelection({ text: 'new', sourceTitle: 'B', charCount: 3 });
-    expect(slice.quotedSelection!.text).toBe('new');
-    expect(slice.quotedSelection!.sourceTitle).toBe('B');
+  it('removeQuotedSelection 只移除指定 chip', () => {
+    slice.addQuotedSelection({ text: 'old', sourceTitle: 'A', sourceKind: 'preview', charCount: 3 });
+    slice.addQuotedSelection({ text: 'new', sourceTitle: 'B', sourceKind: 'chat', charCount: 3 });
+    slice.removeQuotedSelection(0);
+    expect(slice.quotedSelections.map(sel => sel.text)).toEqual(['new']);
+  });
+  it('clearQuotedSelections 清除所有已加入引用', () => {
+    slice.addQuotedSelection({ text: 'test', sourceTitle: 'title', sourceKind: 'preview', charCount: 4 });
+    slice.clearQuotedSelections();
+    expect(slice.quotedSelections).toEqual([]);
   });
 });
 
@@ -66,6 +79,27 @@ describe('input-slice attachedFiles session ownership', () => {
     slice.clearAttachedFiles();
     expect(slice.attachedFilesBySession['/session/a']).toEqual([]);
     expect(slice.attachedFiles).toEqual([]);
+  });
+
+  it('当前会话有 sessionId 时，附件和草稿写入 sessionId-keyed 状态', () => {
+    const slice = makeSlice({
+      currentSessionId: 'sess_input',
+      currentSessionPath: '/session/moved',
+      sessions: [{ sessionId: 'sess_input', path: '/session/moved' }],
+      sessionLocatorsById: { sess_input: { path: '/session/moved' } },
+    });
+
+    slice.addAttachedFile({ path: '/tmp/a.txt', name: 'a.txt' });
+    slice.setDraft('/session/moved', 'hello');
+
+    expect(slice.attachedFilesBySession.sess_input).toEqual([
+      { path: '/tmp/a.txt', name: 'a.txt' },
+    ]);
+    expect(slice.attachedFilesBySession['/session/moved']).toBeUndefined();
+    expect(slice.drafts.sess_input).toBe('hello');
+
+    slice.clearDraft('/session/moved');
+    expect(slice.drafts.sess_input).toBeUndefined();
   });
 
   it('没有 currentSessionPath 时只更新当前输入区，不写 keyed 附件状态', () => {

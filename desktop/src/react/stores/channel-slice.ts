@@ -1,4 +1,4 @@
-import type { AgentPhoneToolMode, Channel, ChannelAgentActivities, ChannelMessage } from '../types';
+import type { AgentPhoneToolMode, Channel, ChannelAgentActivities, ChannelMessage, ChannelTickerStatusMap } from '../types';
 
 export interface ChannelSlice {
   channels: Channel[];
@@ -8,12 +8,13 @@ export interface ChannelSlice {
   channelMessageCacheDirty: Record<string, boolean>;
   channelMembers: string[];
   channelTotalUnread: number;
-  channelsEnabled: boolean;
+  channelsEnabled: boolean | undefined;
   channelHeaderName: string;
   channelHeaderMembersText: string;
   channelInfoName: string;
   channelIsDM: boolean;
   channelAgentActivities: ChannelAgentActivities;
+  channelTickerStatus: ChannelTickerStatusMap;
   channelAgentPhoneToolMode: AgentPhoneToolMode;
   channelAgentReplyMinChars: number | null;
   channelAgentReplyMaxChars: number | null;
@@ -26,7 +27,7 @@ export interface ChannelSlice {
   setCurrentChannel: (channel: string | null) => void;
   setChannelMessages: (messages: ChannelMessage[]) => void;
   setChannelTotalUnread: (count: number) => void;
-  setChannelsEnabled: (enabled: boolean) => void;
+  setChannelsEnabled: (enabled: boolean | undefined) => void;
 }
 
 export const createChannelSlice = (
@@ -39,12 +40,13 @@ export const createChannelSlice = (
   channelMessageCacheDirty: {},
   channelMembers: [],
   channelTotalUnread: 0,
-  channelsEnabled: false,
+  channelsEnabled: undefined,
   channelHeaderName: '',
   channelHeaderMembersText: '',
   channelInfoName: '',
   channelIsDM: false,
   channelAgentActivities: {},
+  channelTickerStatus: {},
   channelAgentPhoneToolMode: 'read_only',
   channelAgentReplyMinChars: null,
   channelAgentReplyMaxChars: null,

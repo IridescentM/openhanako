@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   evaluateChatImageSendPreflight,
+  evaluateChatAudioSendPreflight,
   getModelImageInputMode,
+  getModelAudioInputMode,
   getModelVideoInputMode,
+  hasChatAudioAttachments,
   hasChatImageAttachments,
   hasChatVideoAttachments,
-  notifyTextModelImageBlocked,
-  notifyTextModelVideoBlocked,
+  notifyTextModelAudioBlocked,
+  notifyTextModelImageFileOnly,
+  notifyTextModelVideoFileOnly,
   evaluateChatVideoSendPreflight,
 } from '../../utils/chat-image-send-preflight';
 
@@ -33,6 +37,30 @@ describe('chat image send preflight', () => {
     expect(getModelVideoInputMode({ input: ['text', 'image'], video: true, videoTransportSupported: false })).toBe('no-native-video');
     expect(getModelVideoInputMode({ input: ['text', 'image'], video: true, videoTransport: 'openai-video-url' })).toBe('native-video');
     expect(getModelVideoInputMode({})).toBe('unknown');
+    expect(getModelAudioInputMode({
+      id: 'mimo-v2.5',
+      provider: 'mimo',
+      api: 'openai-completions',
+      baseUrl: 'https://api.xiaomimimo.com/v1',
+      input: ['text'],
+    })).toBe('native-audio');
+    expect(getModelAudioInputMode({
+      id: 'gpt-audio-mini',
+      provider: 'openai',
+      input: ['text'],
+      audio: true,
+      audioTransport: 'openai-input-audio',
+      audioTransportSupported: true,
+    })).toBe('native-audio');
+    expect(getModelAudioInputMode({
+      id: 'future-audio',
+      provider: 'custom',
+      input: ['text'],
+      audio: true,
+      audioTransport: 'unsupported',
+      audioTransportSupported: false,
+    })).toBe('no-native-audio');
+    expect(getModelAudioInputMode({ id: 'deepseek-chat', provider: 'deepseek', input: ['text'] })).toBe('no-native-audio');
   });
 
   it('blocks image send for text-only models when auxiliary vision is unavailable', async () => {
@@ -94,23 +122,23 @@ describe('chat image send preflight', () => {
     expect(loadVisionAuxiliaryConfig).not.toHaveBeenCalled();
   });
 
-  it('builds one actionable warning toast for text-only image sends', () => {
+  it('builds one actionable file-only notice toast for text-only image sends (#1647)', () => {
     const addToast = vi.fn();
     const openSettings = vi.fn();
     const t = (key: string) => `i18n:${key}`;
 
-    notifyTextModelImageBlocked({
+    notifyTextModelImageFileOnly({
       t,
       addToast,
       openSettings,
     });
 
     expect(addToast).toHaveBeenCalledWith(
-      'i18n:input.textModelImageBlocked',
+      'i18n:input.textModelImageFileOnly',
       'warning',
       9000,
       {
-        dedupeKey: 'text-model-image-blocked',
+        dedupeKey: 'text-model-image-file-only',
         action: {
           label: 'i18n:input.openModelSettings',
           onClick: expect.any(Function),
@@ -167,23 +195,89 @@ describe('chat image send preflight', () => {
     });
   });
 
-  it('builds one actionable warning toast for unsupported video sends', () => {
+  it('builds one actionable file-only notice toast for unsupported video sends', () => {
     const addToast = vi.fn();
     const openSettings = vi.fn();
     const t = (key: string) => `i18n:${key}`;
 
-    notifyTextModelVideoBlocked({
+    notifyTextModelVideoFileOnly({
       t,
       addToast,
       openSettings,
     });
 
     expect(addToast).toHaveBeenCalledWith(
-      'i18n:input.textModelVideoBlocked',
+      'i18n:input.textModelVideoFileOnly',
       'warning',
       9000,
       {
-        dedupeKey: 'text-model-video-blocked',
+        dedupeKey: 'text-model-video-file-only',
+        action: {
+          label: 'i18n:input.openModelSettings',
+          onClick: expect.any(Function),
+        },
+      },
+    );
+
+    addToast.mock.calls[0][3].action.onClick();
+    expect(openSettings).toHaveBeenCalledOnce();
+  });
+
+  it('detects only non-directory audio attachments as chat audios', () => {
+    expect(hasChatAudioAttachments([
+      { path: '/tmp/a.wav', name: 'a.wav' },
+      { path: '/tmp/folder.wav', name: 'folder.wav', isDirectory: true },
+    ])).toBe(true);
+
+    expect(hasChatAudioAttachments([
+      { path: '/tmp/a.png', name: 'a.png' },
+      { path: '/tmp/folder.weba', name: 'folder.weba', isDirectory: true },
+    ])).toBe(false);
+  });
+
+  it('allows audio send only when the current model supports direct audio input', async () => {
+    await expect(evaluateChatAudioSendPreflight({
+      attachments: [{ path: '/tmp/a.wav', name: 'a.wav' }],
+      model: {
+        id: 'mimo-v2.5',
+        provider: 'mimo',
+        api: 'openai-completions',
+        baseUrl: 'https://api.xiaomimimo.com/v1',
+        input: ['text'],
+      },
+    })).resolves.toEqual({
+      ok: true,
+      reason: 'native-audio',
+      audioInputMode: 'native-audio',
+    });
+
+    await expect(evaluateChatAudioSendPreflight({
+      attachments: [{ path: '/tmp/a.wav', name: 'a.wav' }],
+      model: { id: 'deepseek-chat', provider: 'deepseek', input: ['text'] },
+    })).resolves.toEqual({
+      ok: false,
+      reason: 'model-audio-unsupported',
+      audioInputMode: 'no-native-audio',
+    });
+  });
+
+  it('builds one actionable warning toast for unsupported audio sends', () => {
+    const addToast = vi.fn();
+    const openSettings = vi.fn();
+    const t = (key: string) => `i18n:${key}`;
+
+    notifyTextModelAudioBlocked({
+      t,
+      addToast,
+      openSettings,
+    });
+
+    expect(addToast).toHaveBeenCalledWith(
+      'i18n:input.textModelAudioBlocked',
+      'warning',
+      9000,
+      {
+        dedupeKey: 'text-model-audio-blocked',
         action: {
           label: 'i18n:input.openModelSettings',
           onClick: expect.any(Function),

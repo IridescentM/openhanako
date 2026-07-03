@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { subscribeStreamKey } from '../../services/stream-key-dispatcher';
 import { renderMarkdown } from '../../utils/markdown';
+import { findOpenToolIndex, toolCallFromStartEvent, toolCallIdFromEvent } from '../../utils/tool-call-identity';
 import type { ChatListItem, ChatMessage, ContentBlock } from '../../stores/chat-types';
 import { useStore } from '../../stores';
+import { sessionScopedValue } from '../../stores/session-slice';
 import { loadMessages } from '../../stores/session-actions';
+import { requestStreamResume } from '../../services/stream-resume';
 import { useContinuousBottomScroll } from '../../hooks/use-continuous-bottom-scroll';
 import { ChatTranscript } from './ChatTranscript';
 import styles from './Chat.module.css';
@@ -13,6 +16,7 @@ const EMPTY_SESSION_RETRY_DELAY_MS = 800;
 
 interface Props {
   taskId: string;
+  sessionId?: string | null;
   sessionPath: string | null;
   agentId?: string | null;
   streamStatus: 'running' | 'done' | 'failed' | 'aborted';
@@ -22,6 +26,24 @@ interface Props {
 
 const PREVIEW_STICKY_THRESHOLD = 32;
 const STREAM_MESSAGE_ID_PREFIX = 'subagent-preview-stream';
+
+function normalizePreviewString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function resolvePreviewSessionPath(state: any, sessionId?: string | null, sessionPath?: string | null): string | null {
+  const normalizedSessionId = normalizePreviewString(sessionId);
+  const normalizedSessionPath = normalizePreviewString(sessionPath);
+  if (!normalizedSessionId) return normalizedSessionPath;
+  if (state.currentSessionId === normalizedSessionId) {
+    return normalizePreviewString(state.currentSessionPath)
+      || normalizePreviewString(state.sessionLocatorsById?.[normalizedSessionId]?.path)
+      || normalizedSessionPath;
+  }
+  return normalizePreviewString(state.sessionLocatorsById?.[normalizedSessionId]?.path)
+    || normalizePreviewString((state.sessions || []).find((item: any) => item?.sessionId === normalizedSessionId)?.path)
+    || normalizedSessionPath;
+}
 
 function hasAssistantHistory(items: ChatListItem[]): boolean {
   return items.some((item) => item.type === 'message' && item.data.role === 'assistant');
@@ -50,9 +72,10 @@ function upsertBlock(
   return insertAtStart ? [nextBlock, ...blocks] : [...blocks, nextBlock];
 }
 
-export function SubagentSessionPreview({ taskId, sessionPath, agentId, streamStatus, summary, scrollContainerRef }: Props) {
+export function SubagentSessionPreview({ taskId, sessionId = null, sessionPath, agentId, streamStatus, summary, scrollContainerRef }: Props) {
   const entry = useStore(s => s.subagentPreviewByTaskId[taskId]);
-  const session = useStore(s => (sessionPath ? s.chatSessions[sessionPath] ?? null : null));
+  const resolvedSessionPath = useStore(s => resolvePreviewSessionPath(s, sessionId, sessionPath));
+  const session = useStore(s => (resolvedSessionPath ? sessionScopedValue(s, s.chatSessions, resolvedSessionPath) ?? null : null));
   const items = session?.items ?? EMPTY_ITEMS;
   const [retryNonce, setRetryNonce] = useState(0);
   const [streamMessage, setStreamMessage] = useState<ChatMessage | null>(null);
@@ -61,7 +84,7 @@ export function SubagentSessionPreview({ taskId, sessionPath, agentId, streamSta
   const bottomScroll = useContinuousBottomScroll({
     scrollRef: scrollContainerRef,
     contentRef,
-    active: !!sessionPath,
+    active: !!resolvedSessionPath,
     stickyThreshold: PREVIEW_STICKY_THRESHOLD,
   });
   const activeStreamTurnRef = useRef(0);
@@ -73,13 +96,19 @@ export function SubagentSessionPreview({ taskId, sessionPath, agentId, streamSta
     return activeStreamTurnRef.current;
   }, []);
 
-  useEffect(() => {
+  // Switch landing in the layout phase (pre-paint). Only arm an instant landing when the target
+  // session has no messages yet, so the first async hydrate (0 -> N) snaps without animating;
+  // an already-loaded session lands via the instant scroll and later growth = streaming (smooth follow).
+  useLayoutEffect(() => {
+    const alreadyHydrated = !!resolvedSessionPath
+      && ((sessionScopedValue(useStore.getState(), useStore.getState().chatSessions, resolvedSessionPath)?.items?.length ?? 0) > 0);
+    if (resolvedSessionPath && !alreadyHydrated) bottomScroll.armInstantLanding();
     bottomScroll.scrollToBottom({ mode: 'instant', forceSticky: true });
     activeStreamTurnRef.current = 0;
     pendingCleanupTurnRef.current = null;
     setStreamMessage(null);
     setStreamRevision(0);
-  }, [bottomScroll, sessionPath]);
+  }, [bottomScroll, resolvedSessionPath]);
 
   useEffect(() => {
     bottomScroll.followBottom();
@@ -90,7 +119,7 @@ export function SubagentSessionPreview({ taskId, sessionPath, agentId, streamSta
   // assistant 记录，被动清理会把刚开始的新一轮 streamMessage 立刻抹掉。
 
   useEffect(() => {
-    if (!sessionPath) return;
+    if (!resolvedSessionPath) return;
     if (items.length > 0) {
       useStore.getState().markSubagentPreviewLoaded(taskId);
       return;
@@ -102,14 +131,14 @@ export function SubagentSessionPreview({ taskId, sessionPath, agentId, streamSta
 
     useStore.getState().setSubagentPreviewLoading(taskId, true);
 
-    void loadMessages(sessionPath)
+    void loadMessages(resolvedSessionPath)
       .then(() => {
         if (cancelled) return;
         const latestState = useStore.getState();
         const latestEntry = latestState.subagentPreviewByTaskId[taskId];
-        if (latestEntry?.sessionPath !== sessionPath) return;
+        if (latestEntry?.sessionPath && latestEntry.sessionPath !== resolvedSessionPath) return;
 
-        const latestItems = latestState.chatSessions[sessionPath]?.items ?? EMPTY_ITEMS;
+        const latestItems = sessionScopedValue(latestState, latestState.chatSessions, resolvedSessionPath)?.items ?? EMPTY_ITEMS;
         if (latestItems.length > 0) {
           latestState.markSubagentPreviewLoaded(taskId);
           return;
@@ -124,12 +153,12 @@ export function SubagentSessionPreview({ taskId, sessionPath, agentId, streamSta
         }
 
         const latest = useStore.getState().subagentPreviewByTaskId[taskId];
-        if (latest?.sessionPath === sessionPath) useStore.getState().markSubagentPreviewLoaded(taskId);
+        if (!latest?.sessionPath || latest.sessionPath === resolvedSessionPath) useStore.getState().markSubagentPreviewLoaded(taskId);
       })
       .catch(() => {
         if (cancelled) return;
         const latest = useStore.getState().subagentPreviewByTaskId[taskId];
-        if (latest?.sessionPath === sessionPath) {
+        if (!latest?.sessionPath || latest.sessionPath === resolvedSessionPath) {
           useStore.getState().setSubagentPreviewLoading(taskId, false);
         }
       });
@@ -138,10 +167,12 @@ export function SubagentSessionPreview({ taskId, sessionPath, agentId, streamSta
       cancelled = true;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
-  }, [taskId, sessionPath, items.length, retryNonce, streamStatus]);
+  }, [taskId, resolvedSessionPath, items.length, retryNonce, streamStatus]);
 
   useEffect(() => {
-    if (!sessionPath || streamStatus !== 'running') return;
+    if (!resolvedSessionPath || streamStatus !== 'running') return;
+    const resumeRef = sessionId ? { sessionId, sessionPath: resolvedSessionPath } : resolvedSessionPath;
+    requestStreamResume(resumeRef);
 
     const updateStreamMessage = (updater: (message: ChatMessage) => ChatMessage) => {
       setStreamMessage((prev) => {
@@ -155,7 +186,7 @@ export function SubagentSessionPreview({ taskId, sessionPath, agentId, streamSta
       setStreamRevision((v) => v + 1);
     };
 
-    const unsubscribe = subscribeStreamKey(sessionPath, (event: any) => {
+    const unsubscribe = subscribeStreamKey(resolvedSessionPath, (event: any) => {
       switch (event.type) {
         case 'thinking_start':
           updateStreamMessage((message) => ({
@@ -237,12 +268,12 @@ export function SubagentSessionPreview({ taskId, sessionPath, agentId, streamSta
               const group = blocks[actualIndex] as Extract<ContentBlock, { type: 'tool_group' }>;
               blocks[actualIndex] = {
                 ...group,
-                tools: [...group.tools, { name: event.name, args: event.args, done: false, success: false }],
+                tools: [...group.tools, toolCallFromStartEvent(event)],
               };
             } else {
               blocks.push({
                 type: 'tool_group',
-                tools: [{ name: event.name, args: event.args, done: false, success: false }],
+                tools: [toolCallFromStartEvent(event)],
                 collapsed: false,
               });
             }
@@ -256,11 +287,13 @@ export function SubagentSessionPreview({ taskId, sessionPath, agentId, streamSta
             for (let i = blocks.length - 1; i >= 0; i -= 1) {
               const block = blocks[i];
               if (block.type !== 'tool_group') continue;
-              const toolIndex = block.tools.findIndex((tool) => tool.name === event.name && !tool.done);
+              const toolIndex = findOpenToolIndex(block.tools, event);
               if (toolIndex < 0) continue;
               const tools = [...block.tools];
+              const id = toolCallIdFromEvent(event);
               tools[toolIndex] = {
                 ...tools[toolIndex],
+                ...(id ? { id } : {}),
                 done: true,
                 success: !!event.success,
                 details: event.details,
@@ -288,11 +321,12 @@ export function SubagentSessionPreview({ taskId, sessionPath, agentId, streamSta
           {
             const cleanupTurn = pendingCleanupTurnRef.current;
             if (!cleanupTurn) break;
-            void loadMessages(sessionPath)
+            void loadMessages(resolvedSessionPath)
               .then(() => {
                 if (pendingCleanupTurnRef.current !== cleanupTurn) return;
                 if (activeStreamTurnRef.current !== cleanupTurn) return;
-                const latestItems = useStore.getState().chatSessions[sessionPath]?.items ?? EMPTY_ITEMS;
+                const latestState = useStore.getState();
+                const latestItems = sessionScopedValue(latestState, latestState.chatSessions, resolvedSessionPath)?.items ?? EMPTY_ITEMS;
                 if (!hasAssistantHistory(latestItems)) return;
                 pendingCleanupTurnRef.current = null;
                 setStreamMessage((prev) => {
@@ -310,31 +344,33 @@ export function SubagentSessionPreview({ taskId, sessionPath, agentId, streamSta
     });
 
     return unsubscribe;
-  }, [beginNextStreamTurn, sessionPath, streamStatus, taskId]);
+  }, [beginNextStreamTurn, resolvedSessionPath, sessionId, streamStatus, taskId]);
 
   const mergedItems = streamMessage
     ? [...items, { type: 'message' as const, data: streamMessage }]
     : items;
 
-  if (!sessionPath) {
+  const t = window.t ?? ((k: string) => k);
+
+  if (!resolvedSessionPath) {
     if (streamStatus !== 'running') {
-      return <div>{summary || (streamStatus === 'failed' ? '历史子会话链接不可恢复' : '暂无可打开的 subagent session')}</div>;
+      return <div>{summary || (streamStatus === 'failed' ? t('chat.subagentPreview.historyUnrecoverable') : t('chat.subagentPreview.noSession'))}</div>;
     }
-    return <div>正在连接 subagent session...</div>;
+    return <div>{t('chat.subagentPreview.connecting')}</div>;
   }
 
   return (
     <div ref={contentRef} className={styles.subagentPreviewTranscript}>
       {entry?.loading && mergedItems.length === 0 ? (
-        <div>正在加载会话...</div>
+        <div>{t('chat.subagentPreview.loadingSession')}</div>
       ) : streamStatus === 'running' && mergedItems.length === 0 ? (
-        <div>正在等待会话内容...</div>
+        <div>{t('chat.subagentPreview.waitingContent')}</div>
       ) : mergedItems.length === 0 ? (
-        <div>暂无会话内容</div>
+        <div>{t('chat.subagentPreview.noContent')}</div>
       ) : (
         <ChatTranscript
           items={mergedItems}
-          sessionPath={sessionPath}
+          sessionPath={resolvedSessionPath}
           agentId={agentId}
           readOnly
           hideUserIdentity

@@ -107,6 +107,7 @@ vi.mock('../../components/input/InputControlBar', () => ({
 
 vi.mock('../../hooks/use-slash-items', () => ({
   useSkillSlashItems: () => [],
+  useServerSlashCommandItems: () => [],
 }));
 
 vi.mock('../../utils/paste-upload-feedback', () => ({
@@ -129,6 +130,8 @@ function seedSession() {
     inlineErrors: {},
     attachedFiles: [],
     docContextAttached: false,
+    quoteCandidate: null,
+    quotedSelections: [],
     quotedSelection: null,
     models: [],
     previewItems: [],
@@ -184,6 +187,40 @@ describe('computer app approval prompt', () => {
         body: JSON.stringify({ action: 'confirmed' }),
       }));
     });
+  });
+
+  it('shows a pending input confirmation that arrived while its session was inactive and not hydrated', () => {
+    const block = {
+      type: 'session_confirmation',
+      confirmId: 'confirm-inactive-1',
+      kind: 'computer_app_approval',
+      surface: 'input',
+      status: 'pending',
+      title: '允许 Hana 使用电脑',
+      body: 'Hana 想控制这个应用来继续当前任务。',
+      subject: { label: 'Mock Notes', detail: 'mock · app.notes' },
+      severity: 'elevated',
+      actions: { confirmLabel: '同意', rejectLabel: '拒绝' },
+      payload: { approval: { providerId: 'mock', appId: 'app.notes' } },
+    };
+    useStore.setState({
+      currentSessionPath: '/session/b.jsonl',
+      sessions: [],
+      chatSessions: {
+        '/session/b.jsonl': { items: [], hasMore: false, loadingMore: false, oldestId: undefined, revision: null },
+      },
+    } as never);
+
+    handleServerMessage({
+      type: 'content_block',
+      sessionPath: '/session/a.jsonl',
+      block,
+    });
+    useStore.setState({ currentSessionPath: '/session/a.jsonl' } as never);
+
+    render(React.createElement(InputArea));
+
+    expect(screen.getByText('是否允许 Hana 控制 Mock Notes')).toBeTruthy();
   });
 
   it('re-enables approval actions when a new pending confirmation replaces the submitted one', async () => {

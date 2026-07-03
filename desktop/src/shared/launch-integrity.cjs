@@ -124,16 +124,20 @@ function buildWindowsInstallSurfaceChecks({ execPath, resourcesPath } = {}) {
   const serverRoot = path.join(resourcesRoot, "server");
   const gitRoot = path.join(resourcesRoot, "git");
   const gitExe = path.join(gitRoot, "cmd", "git.exe");
-  const bashCandidates = [
+  const appExecutableLabel = executablePath ? path.basename(executablePath) : "HanaAgent.exe";
+  // MinGit 打包 usr/bin/sh.exe（sh-compatible POSIX shell）；bash.exe 是老 PortableGit
+  // 安装面的遗留布局，升级半途的混合状态不应误报为损坏。任一存在即视为 POSIX shell 完整。
+  const posixShellCandidates = [
+    path.join(gitRoot, "usr", "bin", "sh.exe"),
     path.join(gitRoot, "bin", "bash.exe"),
     path.join(gitRoot, "usr", "bin", "bash.exe"),
   ];
 
   return [
     {
-      id: "hanako-exe",
-      label: "Hanako.exe",
-      relativePath: "Hanako.exe",
+      id: "app-exe",
+      label: appExecutableLabel,
+      relativePath: appExecutableLabel,
       paths: [executablePath],
       exists: () => !!executablePath && canRead(executablePath),
     },
@@ -174,11 +178,11 @@ function buildWindowsInstallSurfaceChecks({ execPath, resourcesPath } = {}) {
       paths: [path.join(serverRoot, "node_modules", "better-sqlite3", "build", "Release", "better_sqlite3.node")],
     },
     {
-      id: "portable-git",
-      label: "PortableGit",
+      id: "bundled-git",
+      label: "Bundled Git runtime (MinGit)",
       relativePath: "resources/git",
-      paths: [gitExe, ...bashCandidates],
-      exists: () => canRead(gitExe) && bashCandidates.some(canRead),
+      paths: [gitExe, ...posixShellCandidates],
+      exists: () => canRead(gitExe) && posixShellCandidates.some(canRead),
     },
   ];
 }
@@ -227,27 +231,10 @@ function writeLaunchDiagnostic({
   return filePath;
 }
 
-const MAX_LOG_SIZE = 500 * 1024 * 1024; // 500MB
-
 function appendLaunchLog({ diagnosticsDir, event, payload, now = new Date() }) {
   if (!diagnosticsDir) return null;
   fs.mkdirSync(diagnosticsDir, { recursive: true });
   const filePath = path.join(diagnosticsDir, "launch.log");
-
-  // 日志轮转：超过 500MB 时截断，保留最近 1MB
-  try {
-    const stat = fs.statSync(filePath);
-    if (stat.size > MAX_LOG_SIZE) {
-      const content = fs.readFileSync(filePath, "utf-8");
-      const lines = content.split("\n");
-      // 保留最后 1000 行（约 1MB）
-      const kept = lines.slice(Math.max(0, lines.length - 1000)).join("\n");
-      fs.writeFileSync(filePath, kept + "\n", "utf-8");
-    }
-  } catch {
-    // 文件不存在或读取失败，忽略
-  }
-
   fs.appendFileSync(filePath, JSON.stringify({
     event,
     time: now instanceof Date ? now.toISOString() : String(now),
@@ -261,7 +248,7 @@ function formatInstallSurfaceError(result, diagnosticPath) {
   const lines = missing.map(item => `- ${item.relativePath}`);
   const diagnosticLine = diagnosticPath ? `\n\nDiagnostic file:\n${diagnosticPath}` : "";
   return [
-    "Hanako installation is incomplete.",
+    "HanaAgent installation is incomplete.",
     "",
     "Missing or unreadable files:",
     ...lines,

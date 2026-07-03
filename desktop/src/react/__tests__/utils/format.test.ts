@@ -1,5 +1,8 @@
+/**
+ * @vitest-environment jsdom
+ */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { toSlash, baseName, parseCSV, isImageFile, parseMoodFromContent } from '../../utils/format';
+import { toSlash, baseName, parseCSV, isImageFile, parseMoodFromContent, injectCopyButtons } from '../../utils/format';
 
 describe('toSlash', () => {
   it('反斜杠转正斜杠', () => {
@@ -88,5 +91,131 @@ describe('parseMoodFromContent (format.ts)', () => {
     const result = parseMoodFromContent('plain text');
     expect(result.mood).toBeNull();
     expect(result.text).toBe('plain text');
+  });
+});
+
+describe('injectCopyButtons', () => {
+  beforeEach(() => {
+    window.t = ((key: string) => {
+      if (key === 'attach.copy') return '复制';
+      if (key === 'attach.copied') return '已复制';
+      return key;
+    }) as typeof window.t;
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+  });
+
+  it('pre 被 .code-block-wrap 包裹，toolbar 是 wrapper 的直接子元素', () => {
+    const container = document.createElement('div');
+    container.innerHTML = '<pre><code>const x = 1;</code></pre>';
+
+    injectCopyButtons(container);
+
+    const wrapper = container.querySelector<HTMLDivElement>('.code-block-wrap');
+    expect(wrapper).toBeInstanceOf(HTMLDivElement);
+
+    const pre = wrapper?.querySelector('pre');
+    expect(pre).toBeInstanceOf(HTMLPreElement);
+
+    const toolbar = wrapper?.querySelector(':scope > .code-block-toolbar');
+    expect(toolbar).toBeInstanceOf(HTMLDivElement);
+    expect(toolbar?.querySelectorAll('.code-block-toolbar-btn').length).toBe(2);
+    expect(pre?.querySelector('.code-block-toolbar-btn')).toBeNull();
+  });
+
+  it('copy button shows copied state after click', async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const container = document.createElement('div');
+    container.innerHTML = '<pre><code>const x = 1;</code></pre>';
+
+    injectCopyButtons(container);
+
+    const buttons = container.querySelectorAll<HTMLButtonElement>('.code-block-toolbar-btn');
+    const copyBtn = buttons[1];
+    expect(copyBtn).toBeInstanceOf(HTMLButtonElement);
+    expect(copyBtn?.querySelector('svg.code-block-toolbar-btn-icon')).toBeInstanceOf(SVGSVGElement);
+    expect(copyBtn?.dataset.copied).toBe('false');
+    expect(copyBtn?.dataset.copiedLabel).toBe('已复制');
+    expect(copyBtn?.getAttribute('aria-label')).toBe('复制');
+
+    copyBtn?.click();
+    await Promise.resolve();
+
+    expect(writeText).toHaveBeenCalledWith('const x = 1;');
+    expect(copyBtn?.dataset.copied).toBe('true');
+    expect(copyBtn?.getAttribute('aria-label')).toBe('已复制');
+  });
+
+  it('wrap button toggles data-wrap on wrapper', () => {
+    const container = document.createElement('div');
+    container.innerHTML = '<pre><code>const x = 1;</code></pre>';
+
+    injectCopyButtons(container);
+
+    const wrapper = container.querySelector<HTMLDivElement>('.code-block-wrap')!;
+    const wrapBtn = container.querySelector<HTMLButtonElement>('.code-block-toolbar-btn')!;
+
+    expect(wrapper.dataset.wrap).toBeUndefined();
+    expect(wrapBtn.dataset.active).toBe('false');
+
+    wrapBtn.click();
+    expect(wrapper.dataset.wrap).toBe('true');
+    expect(wrapBtn.dataset.active).toBe('true');
+
+    wrapBtn.click();
+    expect(wrapper.dataset.wrap).toBe('false');
+    expect(wrapBtn.dataset.active).toBe('false');
+  });
+
+  it('.mermaid-source 的 pre 不被包裹、不加按钮', () => {
+    const container = document.createElement('div');
+    container.innerHTML = `
+      <div class="mermaid-diagram">
+        <pre class="mermaid-source"><code>graph TD; A-->B</code></pre>
+        <div class="mermaid-rendered"></div>
+      </div>
+    `;
+
+    injectCopyButtons(container);
+
+    const mermaidPre = container.querySelector('pre.mermaid-source');
+    expect(mermaidPre?.parentElement?.classList.contains('code-block-wrap')).toBe(false);
+    expect(mermaidPre?.querySelector('.code-block-toolbar-btn')).toBeNull();
+    expect(container.querySelector('.code-block-wrap')).toBeNull();
+  });
+
+  it('重复调用不重复套 wrapper、不重复加按钮', () => {
+    const container = document.createElement('div');
+    container.innerHTML = '<pre><code>hello</code></pre>';
+
+    injectCopyButtons(container);
+    injectCopyButtons(container);
+
+    expect(container.querySelectorAll('.code-block-wrap').length).toBe(1);
+    expect(container.querySelectorAll('.code-block-toolbar-btn').length).toBe(2);
+  });
+
+  it('混合场景：普通代码块被套 wrapper，mermaid 不动', () => {
+    const container = document.createElement('div');
+    container.innerHTML = `
+      <pre><code>normal code</code></pre>
+      <div class="mermaid-diagram">
+        <pre class="mermaid-source"><code>graph TD; A-->B</code></pre>
+        <div class="mermaid-rendered"></div>
+      </div>
+    `;
+
+    injectCopyButtons(container);
+
+    expect(container.querySelectorAll('.code-block-wrap').length).toBe(1);
+    expect(container.querySelectorAll('.code-block-toolbar-btn').length).toBe(2);
+    expect(container.querySelector('pre.mermaid-source')?.parentElement?.classList.contains('code-block-wrap')).toBe(false);
   });
 });

@@ -33,6 +33,24 @@ contextBridge.exposeInMainWorld("hana", {
   autoUpdateSetChannel: (ch) => ipcRenderer.invoke("auto-update-set-channel", ch),
   getAutoLaunchStatus: () => ipcRenderer.invoke("get-auto-launch-status"),
   setAutoLaunchEnabled: (enabled) => ipcRenderer.invoke("set-auto-launch-enabled", enabled),
+  getKeepAwakeStatus: () => ipcRenderer.invoke("get-keep-awake-status"),
+  setKeepAwakeEnabled: (enabled) => ipcRenderer.invoke("set-keep-awake-enabled", enabled),
+  quickChatReloadShortcut: () => ipcRenderer.invoke("quick-chat-reload-shortcut"),
+  quickChatShortcutStatus: () => ipcRenderer.invoke("quick-chat-shortcut-status"),
+  quickChatShow: () => ipcRenderer.invoke("quick-chat-show"),
+  quickChatHide: () => ipcRenderer.invoke("quick-chat-hide"),
+  quickChatResize: (mode) => ipcRenderer.invoke("quick-chat-resize", mode),
+  quickChatOpenSession: (sessionPath) => ipcRenderer.invoke("quick-chat-open-session", sessionPath),
+  onQuickChatOpenSession: (cb) => {
+    const handler = (_, payload) => cb(payload);
+    ipcRenderer.on("quick-chat-open-session", handler);
+    return () => ipcRenderer.removeListener("quick-chat-open-session", handler);
+  },
+  onQuickChatShown: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("quick-chat-shown", handler);
+    return () => ipcRenderer.removeListener("quick-chat-shown", handler);
+  },
   onAutoUpdateState: (cb) => {
     const handler = (_, state) => cb(state);
     ipcRenderer.on("auto-update-state", handler);
@@ -54,6 +72,7 @@ contextBridge.exposeInMainWorld("hana", {
   readFileSnapshot: (path) => ipcRenderer.invoke("read-file-snapshot", path),
   writeFileIfUnchanged: (filePath, content, expectedVersion) => ipcRenderer.invoke("write-file-if-unchanged", filePath, content, expectedVersion),
   writeFileBinary: (filePath, base64Data) => ipcRenderer.invoke("write-file-binary", filePath, base64Data),
+  copyFile: (sourcePath, destinationPath) => ipcRenderer.invoke("copy-file", sourcePath, destinationPath),
   screenshotRender: (payload) => ipcRenderer.invoke("screenshot-render", payload),
   watchFile: (filePath) => ipcRenderer.invoke("watch-file", filePath),
   unwatchFile: (filePath) => ipcRenderer.invoke("unwatch-file", filePath),
@@ -99,17 +118,19 @@ contextBridge.exposeInMainWorld("hana", {
     ipcRenderer.on("server-restarted", handler);
     return () => ipcRenderer.removeListener("server-restarted", handler);
   },
-  onSystemResumed: (cb) => {
-    const handler = () => cb();
-    ipcRenderer.on("system-resumed", handler);
-    return () => ipcRenderer.removeListener("system-resumed", handler);
-  },
   // 浏览器查看器窗口
-  openBrowserViewer: () => ipcRenderer.invoke("open-browser-viewer", resolveTheme()),
-  onBrowserUpdate: (cb) => ipcRenderer.on("browser-update", (_, data) => cb(data)),
+  openBrowserViewer: (url) => ipcRenderer.invoke("open-browser-viewer", resolveTheme(), url),
+  onBrowserUpdate: (cb) => {
+    const handler = (_, data) => cb(data);
+    ipcRenderer.on("browser-update", handler);
+    return () => ipcRenderer.removeListener("browser-update", handler);
+  },
   browserGoBack: () => ipcRenderer.invoke("browser-go-back"),
   browserGoForward: () => ipcRenderer.invoke("browser-go-forward"),
   browserReload: () => ipcRenderer.invoke("browser-reload"),
+  browserNewTab: () => ipcRenderer.invoke("browser-new-tab"),
+  browserSwitchTab: (tabId) => ipcRenderer.invoke("browser-switch-tab", tabId),
+  browserCloseTab: (tabId) => ipcRenderer.invoke("browser-close-tab", tabId),
   closeBrowserViewer: () => ipcRenderer.invoke("close-browser-viewer"),
   browserEmergencyStop: () => ipcRenderer.invoke("browser-emergency-stop"),
   browserToggleDevTools: () => ipcRenderer.invoke("browser-toggle-devtools"),
@@ -126,8 +147,8 @@ contextBridge.exposeInMainWorld("hana", {
   closeSkillViewer: () => ipcRenderer.invoke("close-skill-viewer"),
   // 原生拖拽（书桌文件拖到 Finder / 聊天区）
   startDrag: (filePaths) => ipcRenderer.send("start-drag", filePaths),
-  // 系统通知
-  showNotification: (title, body) => ipcRenderer.invoke("show-notification", title, body),
+  // 系统通知（agentId 标识触发的助手，主进程据此设头像 icon；缺失则无 icon）
+  showNotification: (title, body, agentId, options) => ipcRenderer.invoke("show-notification", title, body, agentId ?? null, options || null),
   // 窗口控制（Windows/Linux 自绘标题栏）
   getPlatform: () => ipcRenderer.invoke("get-platform"),
   windowMinimize: () => ipcRenderer.invoke("window-minimize"),

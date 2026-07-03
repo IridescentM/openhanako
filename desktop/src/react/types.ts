@@ -1,3 +1,5 @@
+import type { ThinkingLevel } from './stores/model-slice';
+
 // ── Auto-update ──
 
 export interface AutoUpdateState {
@@ -23,19 +25,64 @@ export interface AutoLaunchStatus {
   executableWillLaunchAtLogin?: boolean | null;
 }
 
+export interface KeepAwakeStatus {
+  enabled: boolean;
+  active: boolean;
+  blockerId: number | null;
+  type: 'prevent-app-suspension';
+}
+
+export type DesktopNotificationFocusPolicy = 'always' | 'when_unfocused';
+
+export interface DesktopNotificationOptions {
+  desktopFocusPolicy?: DesktopNotificationFocusPolicy;
+}
+
 // ── 核心数据结构 ──
+
+export type SessionPermissionMode = 'auto' | 'operate' | 'ask' | 'read_only';
+
+/**
+ * #1624：服务端在 session restore 时算好的"工具能力有更新"提示数据
+ * （冻结快照 vs 当前 agent 配置）。前端只消费，不自行计算。
+ */
+export interface SessionCapabilityDrift {
+  version: number;
+  /** 当前 live 配置的能力 fingerprint（dismiss 时回传） */
+  fingerprint: string;
+  frozenFingerprint: string;
+  addedToolNames: string[];
+  removedToolNames: string[];
+  invalidToolNames: string[];
+  promptChanged: boolean;
+  hasDrift: boolean;
+}
 
 export interface Session {
   path: string;
+  sessionId?: string | null;
   title: string | null;
   firstMessage: string;
   modified: string;
+  /**
+   * 服务端磁盘修订点（stat 签名）。null = 服务端未提供（老服务端 / 内存占位投影）。
+   * 与 chatSessions[path].revision 对比用于判断缓存内容是否落后于磁盘真相。
+   */
+  revision?: string | null;
   messageCount: number;
   agentId: string | null;
   agentName: string | null;
   cwd: string | null;
+  workspaceMountId?: string | null;
+  workspaceLabel?: string | null;
+  projectId?: string | null;
+  permissionMode?: SessionPermissionMode | null;
   pinnedAt?: string | null;
   hasSummary?: boolean;
+  agentDeleted?: boolean;
+  readOnlyReason?: 'agent_deleted' | string | null;
+  continuationAvailable?: boolean;
+  deletedAt?: string | null;
   rcAttachment?: {
     sessionKey: string;
     platform: string;
@@ -67,7 +114,12 @@ export interface Model {
   isCurrent?: boolean;
   reasoning?: boolean;
   xhigh?: boolean;
-  /** 输入模态数组（Pi SDK 标准字段）。包含 "image" / "video" 表示模型支持对应媒体输入。 */
+  thinkingLevels?: ThinkingLevel[];
+  defaultThinkingLevel?: ThinkingLevel;
+  audio?: boolean;
+  audioTransport?: string | null;
+  audioTransportSupported?: boolean;
+  /** 输入模态数组（Pi SDK 标准字段）。包含 "image" / "video" 表示模型支持对应媒体输入；音频走 Hana 兼容能力字段。 */
   input?: ("text" | "image" | "video")[];
 }
 
@@ -104,6 +156,29 @@ export interface AgentPhoneActivity {
 }
 
 export type ChannelAgentActivities = Record<string, Record<string, AgentPhoneActivity[]>>;
+
+export interface ChannelTickerStatus {
+  active?: {
+    channelName?: string;
+    agentId?: string;
+    activeAgentId?: string;
+    delivered?: number;
+    agentCount?: number;
+    checks?: number;
+    maxChecks?: number;
+    mode?: string;
+  } | null;
+  nextReminder?: {
+    channelName?: string;
+    dueAt?: string;
+    dueAtMs?: number;
+    intervalMs?: number;
+  } | null;
+  running?: boolean;
+  queued?: boolean;
+}
+
+export type ChannelTickerStatusMap = Record<string, ChannelTickerStatus | null>;
 export type AgentPhoneToolMode = 'read_only' | 'write';
 
 export interface AgentPhoneSettings {
@@ -140,9 +215,12 @@ export interface PreviewItem {
   mime?: string;
   kind?: string;
   storageKind?: string;
+  sourceUrl?: string;
+  sourceRootPath?: string;
   status?: 'available' | 'expired' | string;
   missingAt?: number | null;
   fileVersion?: FileVersion | null;
+  remoteContentRef?: RemoteContentRef | null;
 }
 
 export interface DeskFile {
@@ -150,6 +228,22 @@ export interface DeskFile {
   isDir: boolean;
   size?: number;
   mtime?: string;
+}
+
+export interface StudioWorkspace {
+  workspaceId: string;
+  mountId: string;
+  label: string;
+  sourceKind?: string | null;
+  provider?: string | null;
+  presentation?: string | null;
+  capabilities?: string[];
+  isDefault?: boolean;
+  /**
+   * local_fs mount 的 native 绝对根路径。仅当服务端按 principal 判定为
+   * 本地 owner 时披露；远端/虚拟 mount 恒为 null。
+   */
+  nativeRootPath?: string | null;
 }
 
 export interface WorkspaceChangePayload {
@@ -177,7 +271,7 @@ export interface TodoItem {
 }
 
 // ── 浮动面板类型 ──
-export type ActivePanel = 'activity' | 'automation' | 'bridge' | null;
+export type ActivePanel = 'activity' | 'automation' | 'bridge' | 'skills' | null;
 export type TabType = 'chat' | 'channels' | `plugin:${string}`;
 export type RightWorkspaceTab = 'session-files' | 'workspace' | `plugin-widget:${string}`;
 
@@ -198,15 +292,40 @@ export interface VersionedWriteResult {
   version?: FileVersion | null;
 }
 
+export interface RemoteWorkbenchContentRef {
+  kind: 'workbench-file' | 'mobile-workbench';
+  mountId?: string;
+  rootId?: string;
+  subdir: string;
+  name: string;
+  contentPath: string;
+  version?: FileVersion | null;
+}
+
+export type RemoteContentRef = RemoteWorkbenchContentRef;
+
 // ── Plugin Card Protocol ──
 
+export interface PluginCardSessionRef {
+  sessionId?: string | null;
+  sessionPath?: string | null;
+  legacySessionPath?: string | null;
+  path?: string | null;
+}
+
 export interface PluginCardDetails {
-  type: string;         // "iframe" | future types
+  type: string;         // "iframe" | "webview" | "chat.surface" | future types
   pluginId: string;
-  route: string;
+  route?: string;
   title?: string;
   description: string;  // IM fallback / degradation text
   aspectRatio?: string;
+  sessionId?: string | null;
+  sessionRef?: PluginCardSessionRef | null;
+  sessionPath?: string | null;
+  mode?: 'transcript' | 'full' | string;
+  composer?: boolean;
+  unavailableReason?: string;
 }
 
 // ── 插件 UI 信息 ──
@@ -232,6 +351,28 @@ export interface PluginUiHostCapabilityGrant {
   hostCapabilities: string[];
 }
 
+export interface BrowserViewerTab {
+  tabId: string;
+  title?: string;
+  url?: string | null;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export interface BrowserViewerUpdate {
+  title?: string;
+  url?: string | null;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  running?: boolean;
+  reason?: string | null;
+  sessionPath?: string | null;
+  activeTabId?: string | null;
+  tabs?: BrowserViewerTab[];
+}
+
 // ── Platform API 类型声明 ──
 export interface PlatformApi {
   getServerPort(): Promise<string>;
@@ -245,6 +386,8 @@ export interface PlatformApi {
   selectPlugin?(): Promise<string | null>;
   readFile(path: string): Promise<string | null>;
   writeFile(filePath: string, content: string): Promise<boolean>;
+  writeFileBinary?(filePath: string, base64Data: string): Promise<boolean>;
+  copyFile?(sourcePath: string, destinationPath: string): Promise<boolean>;
   readFileSnapshot?(path: string): Promise<TextFileSnapshot | null>;
   writeFileIfUnchanged?(filePath: string, content: string, expectedVersion?: FileVersion | null): Promise<VersionedWriteResult>;
   watchFile(filePath: string): Promise<boolean>;
@@ -278,7 +421,7 @@ export interface PlatformApi {
   onSettingsChanged(callback: (event: string, payload: unknown) => void): void | (() => void);
   onOpenSettingsModal?(callback: (tab?: string) => void): void | (() => void);
   onSwitchTab?(callback: (tab: string) => void): void | (() => void);
-  onServerRestarted?(callback: (data: { port: number }) => void): void | (() => void);
+  onServerRestarted?(callback: (data: { port: number; token?: string | null }) => void): void | (() => void);
   getFilePath?(file: File): string | null;
   startDrag?(filePaths: string | string[]): void;
   appReady(): void;
@@ -292,13 +435,15 @@ export interface PlatformApi {
   onMaximizeChange?(callback: (maximized: boolean) => void): void;
 
   // ── Browser viewer ──
-  updateBrowserViewer?(data: { running?: boolean; url?: string | null; thumbnail?: string | null }): void;
-  onBrowserUpdate?(callback: (data: { title?: string; canGoBack?: boolean; canGoForward?: boolean; running?: boolean }) => void): void;
+  onBrowserUpdate?(callback: (data: BrowserViewerUpdate) => void): void | (() => void);
   closeBrowserViewer?(): void;
   closeBrowser?(): void;
   browserGoBack?(): void;
   browserGoForward?(): void;
   browserReload?(): void;
+  browserNewTab?(): void;
+  browserSwitchTab?(tabId: string): void;
+  browserCloseTab?(tabId: string): void;
 
   // ── Skill viewer (preload) ──
   listSkillFiles?(baseDir: string): Promise<unknown[]>;
@@ -311,7 +456,7 @@ export interface PlatformApi {
   onboardingComplete?(): Promise<void>;
 
   // ── Notification ──
-  showNotification?(title: string, body: string): void;
+  showNotification?(title: string, body: string, agentId?: string | null, options?: DesktopNotificationOptions): void;
 
   // ── App info ──
   getAppVersion?(): Promise<string>;
@@ -326,6 +471,16 @@ export interface PlatformApi {
   onAutoUpdateState?(callback: (state: AutoUpdateState) => void): (() => void) | void;
   getAutoLaunchStatus?(): Promise<AutoLaunchStatus>;
   setAutoLaunchEnabled?(enabled: boolean): Promise<AutoLaunchStatus>;
+  getKeepAwakeStatus?(): Promise<KeepAwakeStatus>;
+  setKeepAwakeEnabled?(enabled: boolean): Promise<KeepAwakeStatus>;
+  quickChatReloadShortcut?(): Promise<{ ok: boolean; shortcut: string; error?: string }>;
+  quickChatShortcutStatus?(): Promise<{ shortcut: string; registered: boolean }>;
+  quickChatShow?(): void;
+  quickChatHide?(): void;
+  quickChatResize?(request: 'compact' | 'chat' | { mode: 'compact' | 'chat'; height?: number }): void;
+  quickChatOpenSession?(sessionPath: string): void;
+  onQuickChatOpenSession?(callback: (payload: { sessionPath?: string }) => void): (() => void) | void;
+  onQuickChatShown?(callback: () => void): (() => void) | void;
 
   // ── Skill viewer overlay ──
   onShowSkillViewer?(callback: (data: unknown) => void): void;

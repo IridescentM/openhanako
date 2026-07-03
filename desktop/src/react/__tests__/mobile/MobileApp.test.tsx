@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '../../stores';
 import { MobileApp } from '../../mobile/MobileApp';
+import { installMobilePlatform } from '../../mobile/mobile-platform';
 import registry from '../../../shared/theme-registry';
 
 vi.mock('../../components/InputArea', async () => {
@@ -14,7 +15,23 @@ vi.mock('../../components/InputArea', async () => {
     InputArea: ({ surface }: { surface?: string }) => ReactModule.createElement('div', {
       'data-testid': 'desktop-input-area',
       'data-surface': surface || 'desktop',
+      contentEditable: true,
+      role: 'textbox',
+      tabIndex: 0,
     }),
+  };
+});
+
+vi.mock('../../components/SettingsModalShell', async () => {
+  const ReactModule = await import('react');
+  const { useStore } = await import('../../stores');
+  return {
+    SettingsModalShell: () => {
+      const settingsModal = useStore(s => s.settingsModal);
+      return settingsModal.open
+        ? ReactModule.createElement('div', { 'data-testid': 'mobile-settings-modal' }, settingsModal.activeTab)
+        : null;
+    },
   };
 });
 
@@ -43,6 +60,20 @@ class MockWebSocket {
 
 describe('MobileApp', () => {
   const fetchMock = vi.fn();
+  const mobileLoginTranslations: Record<string, string> = {
+    'mobile.auth.title': '手机访问 Hana',
+    'mobile.auth.deviceHelp': '输入桌面端为这台设备生成的访问密钥。',
+    'mobile.auth.passwordHelp': '使用桌面端设置的本地账号登录。',
+    'mobile.auth.tabLabel': '登录方式',
+    'mobile.auth.deviceField': '访问密钥',
+    'mobile.auth.deviceTab': '访问密钥',
+    'mobile.auth.passwordTab': '用户名密码',
+    'mobile.auth.usernameField': '用户名',
+    'mobile.auth.passwordField': '密码',
+    'mobile.auth.plaintextWarning': '远程明文链路不接收账号密码。',
+    'mobile.auth.submit': '登录',
+    'mobile.auth.scopeError': '当前登录缺少工作台权限，请重新输入访问密钥。',
+  };
 
   beforeEach(() => {
     fetchMock.mockReset();
@@ -65,8 +96,8 @@ describe('MobileApp', () => {
     })));
     MockWebSocket.instances = [];
     document.documentElement.removeAttribute('data-platform');
+    delete window.__hanaMobileUpdateAvailable;
     resetStoreForMobileTest();
-    window.t = ((key: string) => key) as typeof window.t;
     window.i18n = {
       locale: 'zh',
       defaultName: 'Hanako',
@@ -74,10 +105,15 @@ describe('MobileApp', () => {
       _agentOverrides: {},
       load: vi.fn(async function load(this: typeof window.i18n, locale: string) {
         this.locale = locale.startsWith('zh') ? 'zh' : locale;
+        this._data = mobileLoginTranslations;
       }),
       setAgentOverrides: vi.fn(),
-      t: (key: string) => key,
+      t: (key: string) => {
+        const value = window.i18n?._data?.[key];
+        return typeof value === 'string' ? value : key;
+      },
     };
+    window.t = ((key: string, vars?: Record<string, string | number>) => window.i18n.t(key, vars)) as typeof window.t;
     window.setTheme = vi.fn();
     window.setSerifFont = vi.fn();
     window.setPaperTexture = vi.fn();
@@ -85,16 +121,19 @@ describe('MobileApp', () => {
 
   afterEach(() => {
     cleanup();
+    delete window.__hanaMobileUpdateAvailable;
     vi.restoreAllMocks();
   });
 
-  it('shows the access-key login when no browser session exists', async () => {
+  it('loads locale before showing the access-key login when no browser session exists', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ authenticated: false, principal: null }));
 
     render(<MobileApp />);
 
     expect(await screen.findByText('手机访问 Hana')).toBeInTheDocument();
+    expect(window.i18n.load).toHaveBeenCalledWith('zh-CN');
     expect(screen.getByLabelText('访问密钥')).toBeInTheDocument();
+    expect(screen.queryByText('mobile.auth.title')).not.toBeInTheDocument();
   });
 
   it('can submit a username and password login without sending a device credential', async () => {
@@ -180,9 +219,11 @@ describe('MobileApp', () => {
 
     render(<MobileApp />);
 
-    expect(await screen.findByText('日常记录')).toBeInTheDocument();
+    expect(await waitForMobileChatReady()).toHaveTextContent('sidebar.newChat');
     expect(screen.getByTestId('desktop-input-area')).toHaveAttribute('data-surface', 'mobile');
     expect(document.querySelector('.titlebar')).toBeInTheDocument();
+    expect(titlebarNewSessionButton()).toHaveAttribute('data-mobile-titlebar-action', 'new-session');
+    expect(screen.getByLabelText('titlebar.currentChatTitle')).toHaveTextContent('sidebar.newChat');
     expect(document.querySelector('.sidebar')).toBeInTheDocument();
     expect(document.querySelector('.jian-sidebar')).toBeInTheDocument();
     expect(useStore.getState().homeFolder).toBe('/workspace');
@@ -192,11 +233,329 @@ describe('MobileApp', () => {
       homeFolder: '/workspace',
       chatModel: { id: 'deepseek-chat', provider: 'deepseek' },
     });
+    expect(useStore.getState().sessions.some(session => session.path === '/hana/sessions/one.jsonl')).toBe(true);
+    expect(useStore.getState().sessionLocatorsById.sess_mobile_one).toEqual({ path: '/hana/sessions/one.jsonl' });
     fireEvent.click(screen.getByTitle('sidebar.jian'));
     expect(await screen.findByText('note.md')).toBeInTheDocument();
   });
 
-  it('opens workbench files through the mobile content route using the desktop preview panel', async () => {
+  it('hydrates persisted mobile runtime configuration from bootstrap', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/web-auth/session')) {
+        return Promise.resolve(jsonResponse({ authenticated: true, principal: principal(['chat', 'resources.read', 'files.read', 'files.write']) }));
+      }
+      return Promise.resolve(jsonResponse(jsonResponseForMobile(url, options, {
+        bootstrap: {
+          homeFolder: '/persisted-workspace',
+          cwdHistory: ['/persisted-workspace', '/older-workspace'],
+          memoryMasterEnabled: false,
+          memoryEnabled: false,
+          thinkingLevel: 'high',
+          editor: {
+            markdown: {
+              fontPreset: 'sans',
+              bodyFontSize: 18,
+              heading1FontSize: 28,
+              heading2FontSize: 24,
+              heading3FontSize: 21,
+              heading4FontSize: 19,
+              heading5FontSize: 18,
+              heading6FontSize: 17,
+              lineHeight: 1.75,
+              contentPadding: 30,
+            },
+          },
+        },
+      })));
+    });
+
+    render(<MobileApp />);
+    await waitForMobileChatReady();
+
+    expect(useStore.getState()).toMatchObject({
+      homeFolder: '/persisted-workspace',
+      selectedFolder: '/persisted-workspace',
+      cwdHistory: ['/persisted-workspace', '/older-workspace'],
+      memoryMasterEnabled: false,
+      memoryEnabled: false,
+      thinkingLevel: 'high',
+    });
+    expect(document.documentElement.style.getPropertyValue('--editor-markdown-font-size')).toBe('18px');
+    expect(document.documentElement.style.getPropertyValue('--editor-markdown-line-height')).toBe('1.75');
+  });
+
+  it('opens the settings modal from the mobile platform settings event', async () => {
+    installMobilePlatform();
+    const onOpenSettingsModal = vi.fn(window.platform?.onOpenSettingsModal?.bind(window.platform));
+    window.platform!.onOpenSettingsModal = onOpenSettingsModal;
+    fetchMock.mockImplementation((input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/web-auth/session')) {
+        return Promise.resolve(jsonResponse({ authenticated: true, principal: principal(['chat', 'resources.read', 'files.read', 'files.write']) }));
+      }
+      return Promise.resolve(jsonResponse(jsonResponseForMobile(url, options)));
+    });
+
+    render(<MobileApp />);
+    await waitForMobileChatReady();
+    await waitFor(() => expect(onOpenSettingsModal).toHaveBeenCalled());
+
+    act(() => {
+      window.platform?.openSettings?.('providers');
+    });
+
+    expect(await screen.findByTestId('mobile-settings-modal')).toHaveTextContent('providers');
+  });
+
+  it('shows a controlled reload action when the PWA has an update ready', async () => {
+    const applyUpdate = vi.fn();
+    window.addEventListener('hana-mobile-apply-update', applyUpdate);
+    fetchMock.mockImplementation((input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/web-auth/session')) {
+        return Promise.resolve(jsonResponse({ authenticated: true, principal: principal(['chat', 'resources.read', 'files.read', 'files.write']) }));
+      }
+      return Promise.resolve(jsonResponse(jsonResponseForMobile(url, options)));
+    });
+
+    try {
+      render(<MobileApp />);
+      await waitForMobileChatReady();
+
+      act(() => {
+        window.dispatchEvent(new Event('hana-mobile-update-available'));
+      });
+
+      expect(await screen.findByText('mobile.update.available')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'mobile.update.reload' }));
+
+      expect(applyUpdate).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener('hana-mobile-apply-update', applyUpdate);
+    }
+  });
+
+  it('keeps a PWA update notice that arrives before the mobile shell is ready', async () => {
+    const applyUpdate = vi.fn();
+    window.addEventListener('hana-mobile-apply-update', applyUpdate);
+    window.__hanaMobileUpdateAvailable = true;
+    fetchMock.mockImplementation((input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/web-auth/session')) {
+        return Promise.resolve(jsonResponse({ authenticated: true, principal: principal(['chat', 'resources.read', 'files.read', 'files.write']) }));
+      }
+      return Promise.resolve(jsonResponse(jsonResponseForMobile(url, options)));
+    });
+
+    try {
+      render(<MobileApp />);
+      await waitForMobileChatReady();
+
+      expect(await screen.findByText('mobile.update.available')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'mobile.update.reload' }));
+
+      expect(applyUpdate).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener('hana-mobile-apply-update', applyUpdate);
+    }
+  });
+
+  it('starts authenticated phones on the welcome draft instead of auto-opening the first session', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/web-auth/session')) {
+        return Promise.resolve(jsonResponse({ authenticated: true, principal: principal(['chat', 'resources.read', 'files.read', 'files.write']) }));
+      }
+      return Promise.resolve(jsonResponse(jsonResponseForMobile(url, options)));
+    });
+
+    render(<MobileApp />);
+
+    expect(await waitForMobileChatReady()).toHaveTextContent('sidebar.newChat');
+    expect(useStore.getState().sessions.some(session => session.path === '/hana/sessions/one.jsonl')).toBe(true);
+    expect(useStore.getState()).toMatchObject({
+      currentSessionPath: null,
+      pendingNewSession: true,
+      welcomeVisible: true,
+    });
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/sessions/messages'))).toBe(false);
+  });
+
+  it('normalizes desktop drawer state before rendering the mobile shell', async () => {
+    stubNarrowViewport(true);
+    useStore.setState({
+      sidebarOpen: true,
+      jianOpen: true,
+      previewOpen: true,
+    });
+    fetchMock.mockImplementation((input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/web-auth/session')) {
+        return Promise.resolve(jsonResponse({ authenticated: true, principal: principal(['chat', 'resources.read', 'files.read', 'files.write']) }));
+      }
+      return Promise.resolve(jsonResponse(jsonResponseForMobile(url, options)));
+    });
+
+    render(<MobileApp />);
+    await waitForMobileChatReady();
+
+    expect(useStore.getState()).toMatchObject({
+      sidebarOpen: false,
+      jianOpen: false,
+      previewOpen: false,
+    });
+    expect(document.querySelector('.mobile-drawer-scrim')).not.toBeInTheDocument();
+    expect(document.querySelector('#previewPanel')).not.toBeInTheDocument();
+  });
+
+  it('refreshes mobile sessions when the phone returns to the foreground', async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/web-auth/session')) {
+        return Promise.resolve(jsonResponse({ authenticated: true, principal: principal(['chat', 'resources.read', 'files.read', 'files.write']) }));
+      }
+      return Promise.resolve(jsonResponse(jsonResponseForMobile(url, options)));
+    });
+
+    render(<MobileApp />);
+    await waitForMobileChatReady();
+    const countSessionListCalls = () => fetchMock.mock.calls
+      .map(([input]) => String(input))
+      .filter(url => url.includes('/api/sessions') && !url.includes('/api/sessions/')).length;
+    const before = countSessionListCalls();
+
+    fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(countSessionListCalls()).toBeGreaterThan(before));
+  });
+
+  it('re-pulls the open session on foreground when its revision drifted while backgrounded (#1610)', async () => {
+    const sessionPath = '/hana/sessions/rc.jsonl';
+    let diskRevision = 'rev-1';
+    fetchMock.mockImplementation((input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/web-auth/session')) {
+        return Promise.resolve(jsonResponse({ authenticated: true, principal: principal(['chat', 'resources.read', 'files.read', 'files.write']) }));
+      }
+      if (url.includes('/api/sessions/messages')) {
+        return Promise.resolve(jsonResponse({
+          messages: [], blocks: [], todos: [], hasMore: false, sessionFiles: [], revision: diskRevision,
+        }));
+      }
+      if (url.includes('/api/sessions') && !url.includes('/api/sessions/')) {
+        return Promise.resolve(jsonResponse([
+          { path: sessionPath, title: 'RC 会话', firstMessage: '', modified: '2026-06-10T00:00:00.000Z', messageCount: 2, agentId: 'hana', agentName: 'Hana', cwd: '/workspace', revision: diskRevision },
+        ]));
+      }
+      return Promise.resolve(jsonResponse(jsonResponseForMobile(url, options)));
+    });
+
+    render(<MobileApp />);
+    await waitForMobileChatReady();
+    await openMobileSession('RC 会话');
+
+    const countMessagesCalls = () => fetchMock.mock.calls
+      .map(([input]) => String(input))
+      .filter(url => url.includes('/api/sessions/messages')).length;
+    await waitFor(() => expect(countMessagesCalls()).toBeGreaterThan(0));
+    const baseline = countMessagesCalls();
+
+    // 后台期间 Bridge /rc 写入了新消息 → 磁盘修订点前进
+    diskRevision = 'rev-2';
+    fireEvent(window, new Event('focus'));
+
+    await waitFor(() => expect(countMessagesCalls()).toBeGreaterThan(baseline));
+  });
+
+  it('does not re-pull the open session on foreground when its revision is unchanged', async () => {
+    const sessionPath = '/hana/sessions/idle.jsonl';
+    fetchMock.mockImplementation((input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/web-auth/session')) {
+        return Promise.resolve(jsonResponse({ authenticated: true, principal: principal(['chat', 'resources.read', 'files.read', 'files.write']) }));
+      }
+      if (url.includes('/api/sessions/messages')) {
+        return Promise.resolve(jsonResponse({
+          messages: [], blocks: [], todos: [], hasMore: false, sessionFiles: [], revision: 'rev-stable',
+        }));
+      }
+      if (url.includes('/api/sessions') && !url.includes('/api/sessions/')) {
+        return Promise.resolve(jsonResponse([
+          { path: sessionPath, title: '安静会话', firstMessage: '', modified: '2026-06-10T00:00:00.000Z', messageCount: 2, agentId: 'hana', agentName: 'Hana', cwd: '/workspace', revision: 'rev-stable' },
+        ]));
+      }
+      return Promise.resolve(jsonResponse(jsonResponseForMobile(url, options)));
+    });
+
+    render(<MobileApp />);
+    await waitForMobileChatReady();
+    await openMobileSession('安静会话');
+
+    const countMessagesCalls = () => fetchMock.mock.calls
+      .map(([input]) => String(input))
+      .filter(url => url.includes('/api/sessions/messages')).length;
+    await waitFor(() => expect(countMessagesCalls()).toBeGreaterThan(0));
+    const baseline = countMessagesCalls();
+    const countSessionListCalls = () => fetchMock.mock.calls
+      .map(([input]) => String(input))
+      .filter(url => url.includes('/api/sessions') && !url.includes('/api/sessions/')).length;
+    const listBaseline = countSessionListCalls();
+
+    fireEvent(window, new Event('focus'));
+
+    // 列表刷新已发生（说明 foreground 流程跑完），但消息不应被重拉
+    await waitFor(() => expect(countSessionListCalls()).toBeGreaterThan(listBaseline));
+    // 排掉 loadMobileSessions().then(reconcile) 的微任务链后再断言「没有补拉」
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(countMessagesCalls()).toBe(baseline);
+  });
+
+  it('syncs the selected session permission mode from the mobile session list', async () => {
+    const planModeEvents: unknown[] = [];
+    const listener = (event: Event) => {
+      planModeEvents.push((event as CustomEvent).detail);
+    };
+    window.addEventListener('hana-plan-mode', listener);
+    fetchMock.mockImplementation((input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/web-auth/session')) {
+        return Promise.resolve(jsonResponse({ authenticated: true, principal: principal(['chat', 'resources.read', 'files.read', 'files.write']) }));
+      }
+      if (url.includes('/api/sessions/switch')) {
+        return Promise.resolve(jsonResponse({
+          cwd: '/workspace',
+          workspaceFolders: [],
+          memoryEnabled: true,
+          permissionMode: 'read_only',
+        }));
+      }
+      if (url.includes('/api/sessions/messages')) {
+        return Promise.resolve(jsonResponse({ messages: [], blocks: [], todos: [], hasMore: false, sessionFiles: [] }));
+      }
+      if (url.includes('/api/sessions')) {
+        return Promise.resolve(jsonResponse([
+          { path: '/hana/sessions/one.jsonl', title: '日常记录', firstMessage: '', modified: '2026-05-16T00:00:00.000Z', messageCount: 2, agentId: 'hana', agentName: 'Hana', cwd: '/workspace', permissionMode: 'read_only' },
+        ]));
+      }
+      return Promise.resolve(jsonResponse(jsonResponseForMobile(url, options)));
+    });
+
+    try {
+      render(<MobileApp />);
+      await waitForMobileChatReady();
+      await openMobileSession('日常记录');
+
+      await waitFor(() => {
+        expect(planModeEvents).toContainEqual({ enabled: true, mode: 'read_only' });
+      });
+    } finally {
+      window.removeEventListener('hana-plan-mode', listener);
+    }
+  });
+
+  it('opens workbench files through the neutral workbench content route using the desktop preview panel', async () => {
     document.documentElement.setAttribute('data-platform', 'web');
     fetchMock.mockImplementation((input: RequestInfo | URL, options?: RequestInit) => {
       const url = String(input);
@@ -208,20 +567,20 @@ describe('MobileApp', () => {
 
     render(<MobileApp />);
 
-    await screen.findByText('日常记录');
+    await waitForMobileChatReady();
     fireEvent.click(screen.getByTitle('sidebar.jian'));
     fireEvent.click(await screen.findByRole('treeitem', { name: /note\.md/ }));
 
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([input]) => {
         const url = String(input);
-        return url.includes('/api/mobile/workbench/content')
+        return url.includes('/api/workbench/content')
           && url.includes('name=note.md')
-          && url.includes('rootId=default');
+          && url.includes('mountId=default');
       })).toBe(true);
       expect(useStore.getState().previewOpen).toBe(true);
+      expect(useStore.getState().previewItems.some(item => item.content.includes('来自手机工作台预览'))).toBe(true);
     });
-    expect(await screen.findByText('来自手机工作台预览', undefined, { timeout: 5000 })).toBeInTheDocument();
   });
 
   it('uses the desktop new-session draft flow on mobile instead of creating an empty session immediately', async () => {
@@ -234,12 +593,43 @@ describe('MobileApp', () => {
     });
 
     render(<MobileApp />);
-    await screen.findByText('日常记录');
-    fireEvent.click(screen.getByTitle('sidebar.newChat'));
+    await waitForMobileChatReady();
+    fireEvent.click(titlebarNewSessionButton());
 
     expect(useStore.getState().pendingNewSession).toBe(true);
     expect(useStore.getState().welcomeVisible).toBe(true);
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/sessions/new'))).toBe(false);
+    expect(screen.getByLabelText('titlebar.currentChatTitle')).toHaveTextContent('sidebar.newChat');
+  });
+
+  it('leaves mobile keyboard viewport handling to the browser', async () => {
+    stubNarrowViewport(true);
+    const viewport = installVisualViewportStub({ height: 700, offsetTop: 0 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 700 });
+    fetchMock.mockImplementation((input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/web-auth/session')) {
+        return Promise.resolve(jsonResponse({ authenticated: true, principal: principal(['chat', 'resources.read', 'files.read', 'files.write']) }));
+      }
+      return Promise.resolve(jsonResponse(jsonResponseForMobile(url, options)));
+    });
+
+    render(<MobileApp />);
+    await waitForMobileChatReady();
+    const shell = mobileShell();
+    expect(shell).not.toHaveAttribute('data-mobile-keyboard-open');
+    expect(shell.style.getPropertyValue('--mobile-layout-height')).toBe('');
+    expect(shell.style.getPropertyValue('--mobile-keyboard-offset')).toBe('');
+
+    fireEvent.focusIn(screen.getByTestId('desktop-input-area'));
+    viewport.height = 420;
+    act(() => {
+      viewport.dispatchEvent(new Event('resize'));
+    });
+
+    expect(shell).not.toHaveAttribute('data-mobile-keyboard-open');
+    expect(shell.style.getPropertyValue('--mobile-layout-height')).toBe('');
+    expect(shell.style.getPropertyValue('--mobile-keyboard-offset')).toBe('');
   });
 
   it('renders server-broadcast user messages through the desktop websocket handler', async () => {
@@ -253,7 +643,8 @@ describe('MobileApp', () => {
 
     render(<MobileApp />);
 
-    await screen.findByText('日常记录');
+    await waitForMobileChatReady();
+    await openMobileSession('日常记录');
     act(() => {
       MockWebSocket.instances[0]?.onmessage?.({
         data: JSON.stringify({
@@ -278,7 +669,7 @@ describe('MobileApp', () => {
 
     render(<MobileApp />);
 
-    await screen.findByText('日常记录');
+    await waitForMobileChatReady();
     act(() => {
       MockWebSocket.instances[0]?.onmessage?.({
         data: JSON.stringify({
@@ -315,7 +706,7 @@ describe('MobileApp', () => {
     });
 
     render(<MobileApp />);
-    await screen.findByText('日常记录');
+    await waitForMobileChatReady();
     await waitFor(() => expect(useStore.getState().sidebarOpen).toBe(false));
 
     fireEvent.touchStart(mobileShell(), {
@@ -344,7 +735,7 @@ describe('MobileApp', () => {
     });
 
     render(<MobileApp />);
-    await screen.findByText('日常记录');
+    await waitForMobileChatReady();
     await waitFor(() => expect(useStore.getState().jianOpen).toBe(false));
 
     fireEvent.touchStart(mobileShell(), {
@@ -373,7 +764,7 @@ describe('MobileApp', () => {
     });
 
     render(<MobileApp />);
-    await screen.findByText('日常记录');
+    await waitForMobileChatReady();
     await waitFor(() => expect(useStore.getState().sidebarOpen).toBe(false));
 
     fireEvent.touchStart(mobileShell(), {
@@ -404,7 +795,11 @@ function principal(scopes: string[], credentialKind = 'device_credential') {
   };
 }
 
-function jsonResponseForMobile(url: string, _options?: RequestInit): unknown {
+function jsonResponseForMobile(
+  url: string,
+  _options?: RequestInit,
+  overrides: { bootstrap?: Record<string, unknown> } = {},
+): unknown {
   if (url.includes('/api/server/identity')) {
     return {
       serverId: 'server_1',
@@ -439,6 +834,7 @@ function jsonResponseForMobile(url: string, _options?: RequestInit): unknown {
         chatModel: { id: 'deepseek-chat', provider: 'deepseek' },
       }],
       appearance: { theme: registry.DEFAULT_THEME, serif: true, paperTexture: false },
+      ...overrides.bootstrap,
     };
   }
   if (url.includes('/api/models')) {
@@ -451,7 +847,7 @@ function jsonResponseForMobile(url: string, _options?: RequestInit): unknown {
       files: [{ name: 'note.md', isDir: false, size: 12, mtime: '2026-05-16T00:00:00.000Z' }],
     };
   }
-  if (url.includes('/api/mobile/workbench/content')) {
+  if (url.includes('/api/workbench/content')) {
     return '# Mobile Note\n\n来自手机工作台预览';
   }
   if (url.includes('/api/desk/jian')) {
@@ -462,7 +858,7 @@ function jsonResponseForMobile(url: string, _options?: RequestInit): unknown {
   }
   if (url.includes('/api/sessions')) {
     return [
-      { path: '/hana/sessions/one.jsonl', title: '日常记录', firstMessage: '', modified: '2026-05-16T00:00:00.000Z', messageCount: 2, agentId: 'hana', agentName: 'Hana', cwd: '/workspace' },
+      { path: '/hana/sessions/one.jsonl', sessionId: 'sess_mobile_one', title: '日常记录', firstMessage: '', modified: '2026-05-16T00:00:00.000Z', messageCount: 2, agentId: 'hana', agentName: 'Hana', cwd: '/workspace' },
     ];
   }
   return {};
@@ -492,10 +888,59 @@ function stubNarrowViewport(matches: boolean): void {
   })));
 }
 
+function installVisualViewportStub({
+  height,
+  offsetTop,
+}: {
+  height: number;
+  offsetTop: number;
+}): EventTarget & { height: number; width: number; offsetTop: number; offsetLeft: number; scale: number } {
+  const viewport = new EventTarget() as EventTarget & {
+    height: number;
+    width: number;
+    offsetTop: number;
+    offsetLeft: number;
+    scale: number;
+  };
+  viewport.height = height;
+  viewport.width = 390;
+  viewport.offsetTop = offsetTop;
+  viewport.offsetLeft = 0;
+  viewport.scale = 1;
+  Object.defineProperty(window, 'visualViewport', {
+    configurable: true,
+    value: viewport,
+  });
+  return viewport;
+}
+
 function mobileShell(): HTMLElement {
   const shell = document.querySelector<HTMLElement>('.mobile-desktop-root');
   if (!shell) throw new Error('mobile shell not found');
   return shell;
+}
+
+function titlebarNewSessionButton(): HTMLElement {
+  const button = document.querySelector<HTMLElement>('[data-mobile-titlebar-action="new-session"]');
+  if (!button) throw new Error('mobile titlebar new-session button not found');
+  return button;
+}
+
+function titlebarSidebarButton(): HTMLElement {
+  const button = document.getElementById('tbToggleLeft');
+  if (!button) throw new Error('mobile titlebar sidebar button not found');
+  return button;
+}
+
+async function openMobileSession(title: string): Promise<void> {
+  if (!useStore.getState().sidebarOpen) {
+    fireEvent.click(titlebarSidebarButton());
+  }
+  fireEvent.click(await screen.findByText(title));
+}
+
+async function waitForMobileChatReady(): Promise<HTMLElement> {
+  return await screen.findByLabelText('titlebar.currentChatTitle');
 }
 
 function resetStoreForMobileTest(): void {
@@ -548,5 +993,6 @@ function resetStoreForMobileTest(): void {
     rightWorkspaceTab: 'workspace',
     jianView: 'desk',
     activePanel: null,
+    settingsModal: { open: false, activeTab: 'agent' },
   });
 }

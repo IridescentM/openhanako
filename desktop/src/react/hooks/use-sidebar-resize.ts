@@ -7,6 +7,9 @@
 
 import { useEffect } from 'react';
 import { useStore } from '../stores';
+import { CHAT_MIN_WIDTH } from '../layout-constants';
+
+type ResizeMax = number | (() => number);
 
 export function useSidebarResize(): void {
   const currentTab = useStore(s => s.currentTab);
@@ -26,11 +29,57 @@ export function useSidebarResize(): void {
     const LEFT_MIN = 180, LEFT_MAX = 400;
     const RIGHT_MIN = 200, RIGHT_MAX = 600;
     const CHANNEL_INSPECTOR_MIN = 220, CHANNEL_INSPECTOR_MAX = 620;
-    const PREVIEW_MIN = 320, PREVIEW_MAX = 800;
+    const PREVIEW_MIN = 320;
 
     const leftInner = sidebarEl?.querySelector('.sidebar-inner') as HTMLElement | null;
     const rightInner = jianSidebarEl?.querySelector('.jian-sidebar-inner') as HTMLElement | null;
-    const previewInner = previewPanel?.querySelector('.preview-panel-inner') as HTMLElement | null;
+    const previewInner = previewPanel?.querySelector('[data-preview-panel-inner]') as HTMLElement | null;
+
+    function cssWidth(name: string, fallback: number): number {
+      const parsed = parseInt(getComputedStyle(root).getPropertyValue(name), 10);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function visiblePanelWidth(el: HTMLElement | null, cssVar: string, fallback: number, visible: boolean): number {
+      if (!visible) return 0;
+      return el?.offsetWidth || cssWidth(cssVar, fallback);
+    }
+
+    function clampWidth(value: number, min: number, max: number): number {
+      const upper = Number.isFinite(max) ? Math.max(min, max) : min;
+      return Math.max(min, Math.min(upper, value));
+    }
+
+    function createResizeEventShield(): () => void {
+      const shield = document.createElement('div');
+      shield.setAttribute('data-resize-event-shield', '');
+      Object.assign(shield.style, {
+        position: 'fixed',
+        inset: '0',
+        zIndex: '2147483647',
+        cursor: 'col-resize',
+        background: 'transparent',
+      });
+      document.body.appendChild(shield);
+      return () => {
+        shield.remove();
+      };
+    }
+
+    function getPreviewMaxWidth(): number {
+      const state = useStore.getState();
+      const occupiedWidth =
+        visiblePanelWidth(sidebarEl, '--sidebar-width', 240, state.sidebarOpen) +
+        visiblePanelWidth(jianSidebarEl, '--jian-sidebar-width', 260, state.jianOpen) +
+        visiblePanelWidth(
+          channelInspectorEl,
+          '--channel-inspector-width',
+          280,
+          state.currentTab === 'channels' && !!state.currentChannel,
+        );
+
+      return Math.max(PREVIEW_MIN, window.innerWidth - occupiedWidth - CHAT_MIN_WIDTH);
+    }
 
     function applySidebarWidth(w: number): void {
       const px = w + 'px';
@@ -73,7 +122,12 @@ export function useSidebarResize(): void {
     if (savedLeft) applySidebarWidth(Number(savedLeft));
     if (savedRight) applyJianWidth(Number(savedRight));
     if (savedChannelInspector) applyChannelInspectorWidth(Number(savedChannelInspector));
-    if (savedPreview) applyPreviewWidth(Number(savedPreview));
+    if (savedPreview) {
+      const savedPreviewWidth = Number(savedPreview);
+      if (Number.isFinite(savedPreviewWidth)) {
+        applyPreviewWidth(clampWidth(savedPreviewWidth, PREVIEW_MIN, getPreviewMaxWidth()));
+      }
+    }
 
     const cleanupFns: Array<() => void> = [];
 
@@ -83,7 +137,7 @@ export function useSidebarResize(): void {
       getWidth: () => number,
       setWidth: (w: number) => void,
       min: number,
-      max: number,
+      max: ResizeMax,
       storageKey: string,
       isRight: boolean,
     ): void {
@@ -98,10 +152,12 @@ export function useSidebarResize(): void {
       };
 
       let activeDragCleanup: (() => void) | null = null;
+      let removeResizeShield: (() => void) | null = null;
 
       const onMouseDown = (e: MouseEvent) => {
         activeDragCleanup?.();
         activeDragCleanup = null;
+        removeResizeShield = null;
 
         e.preventDefault();
         const sidebarTarget = getSidebar();
@@ -112,10 +168,12 @@ export function useSidebarResize(): void {
         let liveWidth = startW;
         handle.classList.add('active');
         document.body.classList.add('resizing');
+        removeResizeShield = createResizeEventShield();
 
         function onMove(e: MouseEvent): void {
           const delta = isRight ? startX - e.clientX : e.clientX - startX;
-          const w = Math.max(min, Math.min(max, startW + delta));
+          const maxWidth = typeof max === 'function' ? max() : max;
+          const w = clampWidth(startW + delta, min, maxWidth);
           liveWidth = w;
           setWidth(w);
           const rect = handle!.getBoundingClientRect();
@@ -126,6 +184,8 @@ export function useSidebarResize(): void {
           handle!.classList.remove('active');
           document.body.classList.remove('resizing');
           handle!.style.setProperty('--handle-y', '-999px');
+          removeResizeShield?.();
+          removeResizeShield = null;
           const w = liveWidth;
           localStorage.setItem(storageKey, String(w));
           document.removeEventListener('mousemove', onMove);
@@ -139,6 +199,8 @@ export function useSidebarResize(): void {
           handle.classList.remove('active');
           document.body.classList.remove('resizing');
           handle.style.setProperty('--handle-y', '-999px');
+          removeResizeShield?.();
+          removeResizeShield = null;
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
           activeDragCleanup = null;
@@ -187,7 +249,7 @@ export function useSidebarResize(): void {
       () => previewPanel,
       () => previewPanel?.offsetWidth || 580,
       (w) => applyPreviewWidth(w),
-      PREVIEW_MIN, PREVIEW_MAX, 'hana-preview-width', true,
+      PREVIEW_MIN, getPreviewMaxWidth, 'hana-preview-width', true,
     );
 
     return () => {

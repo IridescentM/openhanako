@@ -1,16 +1,17 @@
 /**
- * Hanako Desktop — Electron 主进程
+ * HanaAgent Desktop — Electron 主进程
  *
  * 职责：
  * 1. 创建启动窗口（splash）
- * 2. spawn() 启动 Hanako Server
+ * 2. spawn() 启动 HanaAgent Server
  * 3. 等待 server 就绪 + 主窗口初始化完成
  * 4. 关闭 splash，显示主窗口
  * 5. 优雅关闭
  */
-const { app, BrowserWindow, WebContentsView, globalShortcut, ipcMain, dialog, session, shell, nativeTheme, Tray, Menu, nativeImage, systemPreferences, Notification, webContents, screen, powerMonitor } = require("electron");
+const { app, BrowserWindow, WebContentsView, globalShortcut, ipcMain, dialog, session, shell, nativeTheme, Tray, Menu, nativeImage, systemPreferences, Notification, webContents, screen, powerSaveBlocker } = require("electron");
 const os = require("os");
 const path = require("path");
+const crypto = require("crypto");
 const { spawn, execFile } = require("child_process");
 const fs = require("fs");
 const { pathToFileURL } = require("url");
@@ -20,7 +21,9 @@ const {
   getAutoLaunchStatus,
   setAutoLaunchEnabled,
 } = require("./login-item-settings.cjs");
+const { createKeepAwakeManager } = require("./keep-awake.cjs");
 const { createFileWatchRegistry } = require("./file-watch-registry.cjs");
+const { createStableFileWatcher } = require("./file-watch-adapter.cjs");
 const { createWorkspaceWatchRegistry } = require("./workspace-watch-registry.cjs");
 const { readTextFileSnapshot, writeTextFileIfUnchanged } = require("./file-text-io.cjs");
 const chokidar = require("chokidar");
@@ -31,6 +34,11 @@ const {
   submitOnboardingCompleteIntent,
 } = require("./src/shared/onboarding-completion.cjs");
 const { resolveTrashItemPath } = require("./src/shared/trash-item-path.cjs");
+const { resolveAgentAvatarPath } = require("./src/shared/agent-avatar-path.cjs");
+const {
+  normalizeDesktopNotificationOptions,
+  shouldSuppressDesktopNotification,
+} = require("./src/shared/desktop-notification-policy.cjs");
 const { redactLogText } = require("../shared/log-redactor.cjs");
 const {
   configureClientSingleInstance,
@@ -48,10 +56,14 @@ const {
   buildBrowserSearchUrl,
 } = require("../lib/browser/browser-search-extractors.cjs");
 const {
+  waitForBrowserState,
+} = require("./src/shared/browser-wait.cjs");
+const {
   normalizeNetworkProxyConfig,
   electronProxyRulesForConfig,
   electronProxyBypassRulesForConfig,
   proxyConfigToEnvironment,
+  systemProxyConfigToEnvironment,
   withForcedLocalProxyBypass,
 } = require("../shared/network-proxy.cjs");
 const {
@@ -72,8 +84,20 @@ const {
   buildWin32ServerEnv,
 } = require("./src/shared/server-process-env.cjs");
 const {
+  createDesktopLaunchDiagnostics,
+} = require("./src/shared/desktop-launch-diagnostics.cjs");
+const {
   sanitizeWindowState,
 } = require("./src/shared/window-state.cjs");
+const {
+  normalizeQuickChatPreferences,
+} = require("../shared/quick-chat-preferences.cjs");
+const {
+  decorateScreenshotMarkdownIt,
+  escapeAttr,
+  renderScreenshotMarkdownArticle,
+  renderScreenshotCodeArticle,
+} = require("./src/shared/screenshot-markdown.cjs");
 
 const APP_USER_MODEL_ID = "com.hanako.app"; // Keep in sync with package.json build.appId.
 
@@ -83,7 +107,7 @@ const APP_USER_MODEL_ID = "com.hanako.app"; // Keep in sync with package.json bu
   const preloadPath = path.join(__dirname, "preload.bundle.cjs");
   if (!fs.existsSync(preloadPath)) {
     const msg = `Missing preload bundle:\n${preloadPath}\n\nBuild is incomplete. Run 'npm run build:preload' or rebuild the installer.`;
-    try { dialog.showErrorBox("Hanako failed to start", msg); } catch {}
+    try { dialog.showErrorBox("HanaAgent failed to start", msg); } catch {}
     console.error("[desktop] " + redactLogText(msg));
     process.exit(1);
   }
@@ -126,6 +150,8 @@ process.env.HANA_HOME = hanakoHome;
 ensureHanaPiSdkDirs(hanakoHome);
 configureProcessPiSdkEnv(hanakoHome);
 
+const keepAwakeManager = createKeepAwakeManager({ powerSaveBlocker });
+
 function redactMainLogText(value) {
   return redactLogText(value, { homeDir: os.homedir(), extraPaths: [hanakoHome] });
 }
@@ -134,6 +160,18 @@ function readNetworkProxyPreference() {
   const prefsPath = path.join(hanakoHome, "user", "preferences.json");
   const prefs = safeReadJSON(prefsPath, {});
   return normalizeNetworkProxyConfig(prefs?.network_proxy);
+}
+
+function readKeepAwakePreference() {
+  const prefsPath = path.join(hanakoHome, "user", "preferences.json");
+  const prefs = safeReadJSON(prefsPath, {});
+  return prefs?.keep_awake === true;
+}
+
+function readQuickChatPreferences() {
+  const prefsPath = path.join(hanakoHome, "user", "preferences.json");
+  const prefs = safeReadJSON(prefsPath, {});
+  return normalizeQuickChatPreferences(prefs?.quick_chat);
 }
 
 async function applyDesktopNetworkProxy(config, { reason = "runtime" } = {}) {
@@ -191,24 +229,22 @@ async function serverEnvironmentForNetworkProxy(baseEnv) {
     return proxyConfigToEnvironment(config, baseEnv);
   }
 
-  const env = { ...(baseEnv || {}) };
   const [httpProxy, httpsProxy, wsProxy, wssProxy] = await Promise.all([
     resolveElectronProxyUrl("http://example.com"),
     resolveElectronProxyUrl("https://example.com"),
     resolveElectronProxyUrl("ws://example.com"),
     resolveElectronProxyUrl("wss://example.com"),
   ]);
-  if (httpProxy) env.HTTP_PROXY = env.http_proxy = httpProxy;
-  if (httpsProxy) env.HTTPS_PROXY = env.https_proxy = httpsProxy;
-  if (wsProxy) env.WS_PROXY = env.ws_proxy = wsProxy;
-  if (wssProxy) env.WSS_PROXY = env.wss_proxy = wssProxy;
-  const noProxy = withForcedLocalProxyBypass(env.NO_PROXY || env.no_proxy || config.noProxy);
-  if (noProxy) env.NO_PROXY = env.no_proxy = noProxy;
-  return env;
+  return systemProxyConfigToEnvironment({
+    httpProxy,
+    httpsProxy,
+    wsProxy,
+    wssProxy,
+  }, baseEnv, config);
 }
 
 // 按 HANA_HOME 隔离 Electron userData（localStorage / cache / session）
-// 生产: ~/Library/Application Support/Hanako
+// 生产: ~/Library/Application Support/Hanako（历史目录，随 HanaAgent 显示名保留）
 // 开发: ~/Library/Application Support/Hanako-dev
 const defaultHome = path.join(os.homedir(), ".hanako");
 configureClientSingleInstance(app, {
@@ -232,12 +268,35 @@ if (!gpuStartupPolicy.hardwareAccelerationEnabled) {
   console.warn(`[desktop] GPU safe mode enabled (${gpuStartupPolicy.reason}); hardware acceleration disabled for this launch`);
 }
 const desktopStartupId = `${Date.now()}-${process.pid}`;
+const desktopLaunchDiagnostics = createDesktopLaunchDiagnostics({
+  hanakoHome,
+  startupId: desktopStartupId,
+  appVersion: app?.getVersion?.() || "unknown",
+  platform: process.platform,
+  arch: process.arch,
+  redactText: redactMainLogText,
+});
+try {
+  desktopLaunchDiagnostics.reset({
+    pid: process.pid,
+    argv: process.argv.slice(0, 20),
+    packaged: !!app.isPackaged,
+  });
+} catch {
+  // Launch diagnostics are best-effort. Startup must not depend on the log path.
+}
+
+function writeDesktopLaunchDiagnostic(event, details = {}) {
+  desktopLaunchDiagnostics.append(event, details);
+}
+
 if (process.platform === "win32") {
   markGpuStartupPending({
     hanakoHome,
     platform: process.platform,
     phase: "electron-starting",
     startupId: desktopStartupId,
+    policy: gpuStartupPolicy,
   });
 }
 
@@ -278,17 +337,29 @@ app.on("gpu-info-update", () => {
 let splashWindow = null;
 let mainWindow = null;
 let onboardingWindow = null;
+let quickChatWindow = null;
+let quickChatMode = "compact";
+let registeredQuickChatShortcut = null;
 
 let settingsWindow = null;
 
 let browserViewerWindow = null;
 let _browserWebView = null;        // 当前活跃的 WebContentsView
-const _browserViews = new Map();   // sessionPath → WebContentsView（挂起的浏览器）
+const _browserViews = new Map();   // sessionPath -> BrowserWorkspace; BrowserWorkspace.tabs: tabId -> WebContentsView
 let _currentBrowserSession = null; // 当前浏览器绑定的 sessionPath
+let _currentBrowserTabId = null;   // 当前浏览器绑定的 tabId
+let _browserAcceptCookies = true;
+let _browserCookiePolicyInstalled = false;
 
 /** Vite 入口页面统一加载（dev → Vite dev server，其他优先 dist-renderer，最后才回退 src） */
 const _isDev = process.argv.includes("--dev");
 const _distRenderer = path.join(__dirname, "dist-renderer");
+
+const QUICK_CHAT_WIDTH = 480;
+const QUICK_CHAT_COMPACT_HEIGHT = 142;
+const QUICK_CHAT_CHAT_HEIGHT = 520;
+const QUICK_CHAT_MIN_WIDTH = 360;
+const QUICK_CHAT_MIN_HEIGHT = 118;
 
 function loadWindowURL(win, pageName, opts) {
   if (_isDev && process.env.VITE_DEV_URL) {
@@ -308,6 +379,53 @@ function loadWindowURL(win, pageName, opts) {
   }
 }
 
+function attachRendererLaunchDiagnostics(win, label) {
+  if (!win?.webContents) return;
+  writeDesktopLaunchDiagnostic("window-created", { label, id: win.id });
+
+  const wc = win.webContents;
+  const windowDetails = () => ({
+    label,
+    id: win.id,
+    url: wc.getURL(),
+    visible: typeof win.isVisible === "function" ? win.isVisible() : undefined,
+  });
+
+  wc.on("dom-ready", () => {
+    writeDesktopLaunchDiagnostic("dom-ready", windowDetails());
+  });
+  wc.on("did-finish-load", () => {
+    writeDesktopLaunchDiagnostic("did-finish-load", windowDetails());
+  });
+  wc.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    writeDesktopLaunchDiagnostic("did-fail-load", {
+      ...windowDetails(),
+      errorCode,
+      errorDescription,
+      validatedURL,
+      isMainFrame,
+    });
+  });
+  wc.on("render-process-gone", (_event, details) => {
+    writeDesktopLaunchDiagnostic("render-process-gone", {
+      ...windowDetails(),
+      details,
+    });
+  });
+  wc.on("console-message", (_event, level, message, line, sourceId) => {
+    writeDesktopLaunchDiagnostic("console-message", {
+      ...windowDetails(),
+      level,
+      message,
+      line,
+      sourceId,
+    });
+  });
+  win.on("closed", () => {
+    writeDesktopLaunchDiagnostic("window-closed", { label, id: win.id });
+  });
+}
+
 /** 校验浏览器 URL：仅允许 http/https */
 function isAllowedBrowserUrl(url) {
   try {
@@ -315,6 +433,7 @@ function isAllowedBrowserUrl(url) {
     return p.protocol === "http:" || p.protocol === "https:";
   } catch { return false; }
 }
+
 let _browserViewerTheme = themeRegistry.DEFAULT_THEME; // 当前主题（用于 backgroundColor）
 const TITLEBAR_HEIGHT = 44;        // 浏览器窗口标题栏高度（px）
 let serverProcess = null;
@@ -322,7 +441,8 @@ let serverPort = null;
 let serverToken = null;
 let isQuitting = false;  // 区分关窗口（hide）和真正退出（quit）
 let tray = null;
-let reusedServerPid = null; // 复用已有 server 时记录其 PID，退出时发 SIGTERM
+let reusedServerPid = null; // 复用已有 server 时记录其 PID，用 owner 字段决定是否关闭
+let reusedServerOwned = false; // 仅 desktop-owned 的复用 server 才由 desktop 退出时关闭
 let isExitingServer = false; // 只有托盘"退出"时才 kill server，其余路径仅关前端
 let _isUpdating = false;  // auto-updater 正在执行 quitAndInstall，before-quit 跳过 server 清理
 let _autoUpdaterInitialized = false;
@@ -455,6 +575,67 @@ function applyWindowThemeColors(win, rawTheme) {
   }
 }
 
+function summarizeBrowserWindowOptionsForDiagnostics(label, opts) {
+  const webPreferences = opts?.webPreferences || {};
+  return {
+    label,
+    platform: process.platform,
+    width: opts?.width,
+    height: opts?.height,
+    minWidth: opts?.minWidth,
+    minHeight: opts?.minHeight,
+    hasIcon: !!opts?.icon,
+    frame: opts?.frame !== false,
+    hasBackgroundColor: typeof opts?.backgroundColor === "string",
+    titleBarStyle: opts?.titleBarStyle || null,
+    show: opts?.show === true,
+    webPreferences: {
+      hasPreload: !!webPreferences.preload,
+      contextIsolation: webPreferences.contextIsolation !== false,
+      nodeIntegration: webPreferences.nodeIntegration === true,
+    },
+  };
+}
+
+function createBrowserWindowWithDiagnostics(label, opts, { windowsMinimalRetry = false } = {}) {
+  try {
+    return new BrowserWindow(opts);
+  } catch (err) {
+    const summary = summarizeBrowserWindowOptionsForDiagnostics(label, opts);
+    console.error(`[desktop] ${label} BrowserWindow creation failed:`, {
+      message: redactMainLogText(err?.message || String(err)),
+      options: summary,
+    });
+    if (process.platform !== "win32" || !windowsMinimalRetry) throw err;
+
+    const retryOpts = {
+      width: opts?.width || 960,
+      height: opts?.height || 820,
+      minWidth: opts?.minWidth,
+      minHeight: opts?.minHeight,
+      title: opts?.title || "HanaAgent",
+      show: opts?.show === true,
+      ...(opts?.x != null ? { x: opts.x } : {}),
+      ...(opts?.y != null ? { y: opts.y } : {}),
+      webPreferences: opts?.webPreferences,
+    };
+    console.warn(`[desktop] retrying ${label} BrowserWindow with minimal Windows options`, {
+      original: summary,
+      retry: summarizeBrowserWindowOptionsForDiagnostics(`${label}:minimal`, retryOpts),
+    });
+    return new BrowserWindow(retryOpts);
+  }
+}
+
+function applyTransparentWindowBackground(win) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.setBackgroundColor("#00000000");
+  } catch (err) {
+    console.warn("[desktop] set transparent window background failed:", redactMainLogText(err.message));
+  }
+}
+
 /**
  * 获取当前 agent ID（不依赖 server）
  * 优先读 user/preferences.json，fallback 扫描 agents/ 第一个有效目录
@@ -550,7 +731,7 @@ function isPidAliveForDiagnostics(pid) {
 }
 
 function hasChildExitObserved(proc) {
-  if (!proc) return true;
+  if (!proc) return false;
   return proc.exitCode !== null || proc.signalCode !== null;
 }
 
@@ -652,6 +833,77 @@ function pollServerInfo(infoPath, {
   });
 }
 
+const DEFAULT_SERVER_NETWORK_CONFIG = Object.freeze({
+  mode: "loopback",
+  listenHost: "127.0.0.1",
+  listenPort: 14500,
+});
+const VALID_SERVER_NETWORK_MODES = new Set(["loopback", "lan", "custom_remote"]);
+const LOOPBACK_LISTEN_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+function normalizeDesiredServerNetworkConfig(value) {
+  const input = value && typeof value === "object" ? value : DEFAULT_SERVER_NETWORK_CONFIG;
+  const mode = typeof input.mode === "string" ? input.mode.trim() : "";
+  if (!VALID_SERVER_NETWORK_MODES.has(mode)) throw new Error(`invalid mode: ${mode || "(empty)"}`);
+  const listenHost = typeof input.listenHost === "string" ? input.listenHost.trim() : "";
+  if (!listenHost) throw new Error("listenHost required");
+  if (mode === "loopback" && !LOOPBACK_LISTEN_HOSTS.has(listenHost.toLowerCase())) {
+    throw new Error("loopback mode must use a loopback listenHost");
+  }
+  const listenPort = Number(input.listenPort);
+  if (!Number.isInteger(listenPort) || listenPort < 1024 || listenPort > 65535) {
+    throw new Error("listenPort must be between 1024 and 65535");
+  }
+  return { mode, listenHost, listenPort };
+}
+
+function readDesiredServerNetworkConfig() {
+  const filePath = path.join(hanakoHome, "server-network.json");
+  try {
+    return { config: normalizeDesiredServerNetworkConfig(JSON.parse(fs.readFileSync(filePath, "utf-8"))) };
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      return { config: { ...DEFAULT_SERVER_NETWORK_CONFIG } };
+    }
+    return { error: err?.message || String(err) };
+  }
+}
+
+function nonEmptyString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function integerOrNull(value) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function liveServerNetworkFrom(existingInfo, health) {
+  const network = health?.network && typeof health.network === "object" ? health.network : {};
+  return {
+    mode: nonEmptyString(network.mode) || nonEmptyString(network.runtimeMode) || nonEmptyString(existingInfo?.networkMode) || null,
+    listenHost: nonEmptyString(network.listenHost) || nonEmptyString(network.runtimeHost) || nonEmptyString(existingInfo?.configuredHost) || nonEmptyString(existingInfo?.host) || null,
+    actualPort: integerOrNull(network.actualPort) || integerOrNull(existingInfo?.port),
+    configuredMode: nonEmptyString(network.configuredMode) || nonEmptyString(existingInfo?.configuredMode) || null,
+    configuredListenHost: nonEmptyString(network.configuredListenHost) || nonEmptyString(existingInfo?.configuredListenHost) || null,
+    configuredPort: integerOrNull(network.configuredPort) || integerOrNull(existingInfo?.configuredPort),
+  };
+}
+
+function describeReusableServerNetworkMismatch(existingInfo, health, desired) {
+  const live = liveServerNetworkFrom(existingInfo, health);
+  if (live.mode !== desired.mode) {
+    return `network mode mismatch: wanted ${desired.mode}, live ${live.mode || "unknown"}`;
+  }
+  if (live.listenHost !== desired.listenHost) {
+    return `network host mismatch: wanted ${desired.listenHost}, live ${live.listenHost || "unknown"}`;
+  }
+  if (live.actualPort !== desired.listenPort) {
+    return `network port mismatch: wanted ${desired.listenPort}, live ${live.actualPort || "unknown"}`;
+  }
+  return null;
+}
+
 async function verifyReusableServerInfo(existingInfo) {
   const port = Number(existingInfo?.port);
   const token = typeof existingInfo?.token === "string" ? existingInfo.token : "";
@@ -708,7 +960,27 @@ async function verifyReusableServerInfo(existingInfo) {
     return { reusable: false, trusted: true, terminate: false, reason: "studio identity mismatch", health, identity };
   }
 
+  const desiredNetwork = readDesiredServerNetworkConfig();
+  if (desiredNetwork.error) {
+    return { reusable: false, trusted: true, terminate: false, reason: `invalid desired network config: ${desiredNetwork.error}`, health, identity };
+  }
+  const networkMismatch = describeReusableServerNetworkMismatch(existingInfo, health, desiredNetwork.config);
+  if (networkMismatch) {
+    return {
+      reusable: false,
+      trusted: true,
+      terminate: isDesktopOwnedServerInfo(existingInfo),
+      reason: networkMismatch,
+      health,
+      identity,
+    };
+  }
+
   return { reusable: true, trusted: true, terminate: false, reason: "ok", health, identity };
+}
+
+function isDesktopOwnedServerInfo(info) {
+  return info?.ownerKind === "desktop";
 }
 
 async function startServer() {
@@ -732,6 +1004,7 @@ async function startServer() {
         serverPort = existingInfo.port;
         serverToken = existingInfo.token;
         reusedServerPid = existingInfo.pid;
+        reusedServerOwned = isDesktopOwnedServerInfo(existingInfo);
         return; // 跳过启动
       }
 
@@ -819,13 +1092,24 @@ async function startServer() {
 async function _spawnServerOnce(serverInfoPath) {
   _serverLogs = [];
   _lastServerProgressAtMs = null;
+  reusedServerPid = null;
+  reusedServerOwned = false;
 
-  let serverEnv = { ...withHanaPiSdkEnv(process.env, hanakoHome), HANA_HOME: hanakoHome };
+  let serverEnv = {
+    ...withHanaPiSdkEnv(process.env, hanakoHome),
+    HANA_HOME: hanakoHome,
+    HANA_SERVER_OWNER: "desktop",
+    HANA_SERVER_OWNER_PID: String(process.pid),
+    HANA_DESKTOP_EXEC_PATH: process.execPath,
+    HANA_DESKTOP_APP_PATH: app.getAppPath(),
+    HANA_DESKTOP_IS_PACKAGED: app.isPackaged ? "1" : "0",
+  };
   serverEnv = await serverEnvironmentForNetworkProxy(serverEnv);
 
-  // Windows: 注入 PortableGit 路径，并从注册表补齐当前系统 / 用户 PATH。
+  // Windows: 注入 bundled Git runtime（MinGit）路径，并从注册表补齐当前系统 / 用户 PATH。
   if (process.platform === "win32") {
-    // PortableGit 结构：cmd/git.exe, bin/bash.exe, usr/bin/*, mingw64/bin/*
+    // MinGit 结构：cmd/git.exe, usr/bin/*（含 sh.exe）, mingw64/bin/*；
+    // bin/ 是老 PortableGit 布局的遗留，不存在时被 existsSync 过滤
     const gitRoot = path.join(process.resourcesPath || "", "git");
     const gitPaths = [
       path.join(gitRoot, "bin"),
@@ -863,9 +1147,9 @@ async function _spawnServerOnce(serverInfoPath) {
     // native addon 被 Electron 自带 Node 误加载。
     const devRoot = path.join(__dirname, "..");
     serverBin = process.env.HANA_DEV_NODE_BIN || process.env.npm_node_execpath || "node";
-    serverArgs = [path.join(devRoot, "server", "bootstrap.js")];
+    serverArgs = [path.join(devRoot, "server", "bootstrap.ts")];
     serverEnv.HANA_ROOT = devRoot;
-    serverEnv.HANA_SERVER_ENTRY = path.join(devRoot, "server", "index.js");
+    serverEnv.HANA_SERVER_ENTRY = path.join(devRoot, "server", "index.ts");
     // Keep dev and packaged startup contracts identical.
     serverEnv.HANA_CREATE_STARTUP_SESSION = "0";
     delete serverEnv.ELECTRON_RUN_AS_NODE;
@@ -952,23 +1236,23 @@ function monitorServer() {
         monitorServer(); // 重新挂监控
         // 通知前端重连
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("server-restarted", { port: serverPort });
+          mainWindow.webContents.send("server-restarted", { port: serverPort, token: serverToken });
         }
         // 设置窗口也需要知道新端口（否则旧端口的 API 全部失败）
         if (settingsWindow && !settingsWindow.isDestroyed()) {
-          settingsWindow.webContents.send("server-restarted", { port: serverPort });
+          settingsWindow.webContents.send("server-restarted", { port: serverPort, token: serverToken });
         }
       } catch (err) {
         console.error("[desktop] Server 重启失败:", err.message);
         writeCrashLog(`Server 重启失败: ${err.message}`);
-        dialog.showErrorBox("Hanako Server", mt("dialog.serverRestartFailed", {
+        dialog.showErrorBox("HanaAgent Server", mt("dialog.serverRestartFailed", {
           version: app?.getVersion?.() || "unknown",
           error: err.message,
         }));
       }
     } else {
       writeCrashLog(`Server 多次崩溃 (${reason})，放弃重启`);
-      dialog.showErrorBox("Hanako Server", mt("dialog.serverMultipleCrash", {
+      dialog.showErrorBox("HanaAgent Server", mt("dialog.serverMultipleCrash", {
         version: app?.getVersion?.() || "unknown",
         reason,
       }));
@@ -983,43 +1267,55 @@ function showPrimaryWindow() {
   if (process.platform === "darwin") app.dock.show();
   const win = mainWindow || onboardingWindow;
   focusExistingWindow(win);
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.show();
-  if (browserViewerWindow && !browserViewerWindow.isDestroyed()) browserViewerWindow.show();
-  for (const [, vw] of _viewerWindows) {
-    if (vw && !vw.isDestroyed()) vw.show();
-  }
 }
 
 /**
  * 创建系统托盘图标
  * - 双击：显示主窗口
- * - 右键菜单：显示 Hanako / 设置 / 退出
+ * - 右键菜单：显示 HanaAgent / 设置 / 退出
  */
+function resolveTrayAssetCandidates(fileName) {
+  const candidates = [];
+  if (app.isPackaged && process.resourcesPath) {
+    candidates.push(path.join(process.resourcesPath, "assets", fileName));
+  }
+  candidates.push(path.join(__dirname, "src", "assets", fileName));
+  return [...new Set(candidates)];
+}
+
+function loadTrayImageFromCandidates(fileNames) {
+  const attempted = [];
+  for (const fileName of fileNames) {
+    for (const candidate of resolveTrayAssetCandidates(fileName)) {
+      attempted.push(candidate);
+      if (!fs.existsSync(candidate)) continue;
+      const image = nativeImage.createFromPath(candidate);
+      if (image && (typeof image.isEmpty !== "function" || !image.isEmpty())) {
+        return { image, path: candidate };
+      }
+    }
+  }
+  throw new Error(`Tray icon asset unavailable; checked: ${attempted.join(", ")}`);
+}
+
 function createTray() {
   const isDev = !app.isPackaged;
-  let icon;
+  let resolved;
   if (process.platform === "win32") {
     // Windows 优先用 .ico，缺失则回退到 .png
     const icoName = isDev ? "tray-dev.ico" : "tray.ico";
-    const icoPath = path.join(__dirname, "src", "assets", icoName);
-    if (fs.existsSync(icoPath)) {
-      icon = nativeImage.createFromPath(icoPath);
-    } else {
-      const pngName = isDev ? "tray-dev-template.png" : "tray-template.png";
-      icon = nativeImage.createFromPath(path.join(__dirname, "src", "assets", pngName));
-    }
+    const pngName = isDev ? "tray-dev-template.png" : "tray-template.png";
+    resolved = loadTrayImageFromCandidates([icoName, pngName]);
   } else {
     const iconName = isDev ? "tray-dev-template.png" : "tray-template.png";
-    const iconPath = path.join(__dirname, "src", "assets", iconName);
-    icon = nativeImage.createFromPath(iconPath);
-    if (process.platform === "darwin") icon.setTemplateImage(true);
+    resolved = loadTrayImageFromCandidates([iconName]);
+    if (process.platform === "darwin") resolved.image.setTemplateImage(true);
   }
-  tray = new Tray(icon);
-  tray.setToolTip(isDev ? "Hanako (dev)" : "Hanako");
+  tray = new Tray(resolved.image);
+  tray.setToolTip(isDev ? "HanaAgent (dev)" : "HanaAgent");
 
   const buildMenu = () => Menu.buildFromTemplate([
-    { label: mt("tray.show", null, "Show Hanako"), click: () => showPrimaryWindow() },
+    { label: mt("tray.show", null, "Show HanaAgent"), click: () => showPrimaryWindow() },
     { label: mt("tray.settings", null, "Settings"), click: () => createSettingsWindow() },
     { type: "separator" },
     { label: mt("tray.quit", null, "Quit"), click: () => { isExitingServer = true; isQuitting = true; app.quit(); } },
@@ -1102,7 +1398,7 @@ function buildLaunchFailureDialogDetail(err, crashInfo) {
   const rootServerError = structuredPortConflict || extractRootServerStartupError(_serverLogs);
   const tail = crashInfo.length > 800 ? "...\n" + crashInfo.slice(-800) : crashInfo;
   if (!rootServerError) return tail;
-  if (tail.includes(rootServerError)) return tail;
+  if (tail.trimStart().startsWith(rootServerError)) return tail;
   return `${rootServerError}\n\n${tail}`;
 }
 
@@ -1112,8 +1408,8 @@ function writeCrashLog(errorMessage) {
   const diagnostics = buildServerCrashDiagnostics();
 
   const content = redactMainLogText([
-    `=== Hanako Crash Log ===`,
-    `Hanako: v${app?.getVersion?.() || "unknown"}`,
+    `=== HanaAgent Crash Log ===`,
+    `HanaAgent: v${app?.getVersion?.() || "unknown"}`,
     `Time: ${timestamp}`,
     `Error: ${errorMessage}`,
     `Platform: ${process.platform} ${process.arch}`,
@@ -1153,7 +1449,7 @@ function createSplashWindow() {
     height: 280,
     resizable: false,
     frame: false,
-    title: "Hanako",
+    title: "HanaAgent",
     ...titleBarOpts({ x: 12, y: 12 }),
     transparent: true,
     show: false,
@@ -1163,6 +1459,7 @@ function createSplashWindow() {
       nodeIntegration: false,
     },
   });
+  attachRendererLaunchDiagnostics(splashWindow, "splash");
 
   loadWindowURL(splashWindow, "splash");
 
@@ -1213,6 +1510,285 @@ function saveWindowState() {
   }, 500);
 }
 
+// ── Quick Chat 小窗状态与全局快捷键 ──
+const quickChatWindowStatePath = path.join(hanakoHome, "user", "quick-chat-window-state.json");
+
+function quickChatHeightForMode(mode, requestedHeight = null) {
+  const base = mode === "chat" ? QUICK_CHAT_CHAT_HEIGHT : QUICK_CHAT_COMPACT_HEIGHT;
+  const height = Number.isFinite(requestedHeight) ? Math.max(base, Math.round(requestedHeight)) : base;
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const area = display?.workArea || display?.bounds || { height };
+  const maxHeight = Math.max(QUICK_CHAT_MIN_HEIGHT, (area.height || height) - 24);
+  return Math.min(height, maxHeight);
+}
+
+function loadQuickChatWindowState() {
+  try {
+    return JSON.parse(fs.readFileSync(quickChatWindowStatePath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function defaultQuickChatWindowState(mode, requestedHeight = null) {
+  const height = quickChatHeightForMode(mode, requestedHeight);
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const area = display?.workArea || display?.bounds || { x: 0, y: 0, width: QUICK_CHAT_WIDTH, height };
+  return {
+    width: QUICK_CHAT_WIDTH,
+    height,
+    x: Math.round(area.x + (area.width - QUICK_CHAT_WIDTH) / 2),
+    y: Math.round(area.y + (area.height - height) / 3),
+  };
+}
+
+function resolveQuickChatWindowBounds(mode, state = loadQuickChatWindowState(), requestedHeight = null) {
+  const base = state || defaultQuickChatWindowState(mode, requestedHeight);
+  const chatWidth = Number.isFinite(base.chatWidth) ? base.chatWidth : base.width;
+  const chatHeight = Number.isFinite(base.chatHeight) ? base.chatHeight : base.height;
+  const width = mode === "chat"
+    ? Math.max(QUICK_CHAT_MIN_WIDTH, Math.round(chatWidth || QUICK_CHAT_WIDTH))
+    : QUICK_CHAT_WIDTH;
+  const requestedModeHeight = quickChatHeightForMode(mode, requestedHeight);
+  const height = mode === "chat"
+    ? quickChatHeightForMode(mode, Math.max(requestedModeHeight, Math.round(chatHeight || 0)))
+    : requestedModeHeight;
+  const sanitized = sanitizeWindowState(
+    { ...base, width, height },
+    screen.getAllDisplays(),
+    {
+      defaultWidth: width,
+      defaultHeight: height,
+      minWidth: QUICK_CHAT_MIN_WIDTH,
+      minHeight: Math.min(QUICK_CHAT_MIN_HEIGHT, height),
+      minVisibleWidth: 96,
+      minVisibleHeight: 72,
+    },
+  ) || defaultQuickChatWindowState(mode, requestedHeight);
+  return {
+    x: sanitized.x,
+    y: sanitized.y,
+    width: mode === "chat"
+      ? Math.max(QUICK_CHAT_MIN_WIDTH, sanitized.width || width)
+      : QUICK_CHAT_WIDTH,
+    height: sanitized.height || height,
+  };
+}
+
+let _saveQuickChatWindowStateTimer = null;
+let _saveQuickChatWindowStateChain = Promise.resolve();
+function saveQuickChatWindowState() {
+  if (_saveQuickChatWindowStateTimer) clearTimeout(_saveQuickChatWindowStateTimer);
+  _saveQuickChatWindowStateTimer = setTimeout(() => {
+    _saveQuickChatWindowStateTimer = null;
+    if (!quickChatWindow || quickChatWindow.isDestroyed()) return;
+    const bounds = quickChatWindow.getBounds();
+    const previous = loadQuickChatWindowState() || {};
+    const state = {
+      ...previous,
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+    };
+    const previousLooksLikeChat = Number.isFinite(previous.width)
+      && Number.isFinite(previous.height)
+      && (previous.width > QUICK_CHAT_WIDTH || previous.height > QUICK_CHAT_COMPACT_HEIGHT);
+    if (quickChatMode === "chat") {
+      state.chatWidth = bounds.width;
+      state.chatHeight = bounds.height;
+    } else if (!Number.isFinite(state.chatWidth) && previousLooksLikeChat) {
+      state.chatWidth = previous.width;
+      state.chatHeight = previous.height;
+    }
+    _saveQuickChatWindowStateChain = _saveQuickChatWindowStateChain.then(async () => {
+      await fs.promises.mkdir(path.dirname(quickChatWindowStatePath), { recursive: true });
+      await fs.promises.writeFile(quickChatWindowStatePath, JSON.stringify(state, null, 2) + "\n");
+    }).catch(e => {
+      console.error("[desktop] 保存 Quick Chat 窗口状态失败:", e.message);
+    });
+  }, 300);
+}
+
+function normalizeQuickChatResizeRequest(request) {
+  if (request && typeof request === "object") {
+    return {
+      mode: request.mode === "chat" ? "chat" : "compact",
+      height: Number.isFinite(request.height) ? request.height : null,
+    };
+  }
+  return {
+    mode: request === "chat" ? "chat" : "compact",
+    height: null,
+  };
+}
+
+function applyQuickChatMode(request) {
+  if (!quickChatWindow || quickChatWindow.isDestroyed()) return;
+  const { mode, height } = normalizeQuickChatResizeRequest(request);
+  const prevMode = quickChatMode;
+  quickChatMode = mode;
+  const currentBounds = quickChatWindow.getBounds();
+  const savedState = mode === "chat" ? loadQuickChatWindowState() : null;
+  const stateForMode = savedState
+    ? { ...savedState, x: currentBounds.x, y: currentBounds.y }
+    : currentBounds;
+  const bounds = resolveQuickChatWindowBounds(quickChatMode, stateForMode, height);
+
+  if (mode === "chat") {
+    // chat 模式：允许用户手动调整大小，且只增不缩（尊重用户手动拉大的尺寸）
+    if (prevMode === "chat") {
+      bounds.height = Math.max(bounds.height, currentBounds.height);
+      bounds.width = Math.max(bounds.width, currentBounds.width);
+    }
+    quickChatWindow.setResizable(true);
+  } else {
+    // compact 模式：固定大小
+    quickChatWindow.setResizable(false);
+  }
+
+  quickChatWindow.setBounds(bounds, true);
+  saveQuickChatWindowState();
+}
+
+function createQuickChatWindow() {
+  if (quickChatWindow && !quickChatWindow.isDestroyed()) return quickChatWindow;
+
+  quickChatMode = "compact";
+  const bounds = resolveQuickChatWindowBounds(quickChatMode);
+
+  quickChatWindow = new BrowserWindow({
+    ...bounds,
+    minWidth: QUICK_CHAT_MIN_WIDTH,
+    minHeight: QUICK_CHAT_MIN_HEIGHT,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: process.platform !== "darwin",
+    frame: false,
+    alwaysOnTop: true,
+    title: "Hana Quick Chat",
+    transparent: true,
+    backgroundColor: "#00000000",
+    hasShadow: false,
+    show: false,
+    acceptFirstMouse: true,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.bundle.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  attachRendererLaunchDiagnostics(quickChatWindow, "quick-chat");
+  applyTransparentWindowBackground(quickChatWindow);
+  loadWindowURL(quickChatWindow, "quick-chat");
+
+  quickChatWindow.on("move", saveQuickChatWindowState);
+  quickChatWindow.on("resize", saveQuickChatWindowState);
+  quickChatWindow.on("close", (event) => {
+    if (!isQuitting && !_isUpdating && !forceQuitApp) {
+      event.preventDefault();
+      hideQuickChatWindow();
+    }
+  });
+  quickChatWindow.on("closed", () => {
+    quickChatWindow = null;
+  });
+
+  return quickChatWindow;
+}
+
+function suspendMainWindowFocusForQuickChatHide() {
+  if (process.platform !== "darwin") return;
+  if (!quickChatWindow || quickChatWindow.isDestroyed() || !quickChatWindow.isFocused()) return;
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return;
+  try {
+    mainWindow.setFocusable(false);
+    setTimeout(() => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setFocusable(true);
+      } catch {}
+    }, 300);
+  } catch (err) {
+    console.warn("[desktop] Quick Chat 隐藏时焦点保护失败:", redactMainLogText(err.message));
+  }
+}
+
+function hideQuickChatWindow() {
+  if (!quickChatWindow || quickChatWindow.isDestroyed()) return;
+  saveQuickChatWindowState();
+  suspendMainWindowFocusForQuickChatHide();
+  quickChatWindow.hide();
+}
+
+function showQuickChatWindow() {
+  const win = createQuickChatWindow();
+  if (win.isMinimized()) win.restore();
+  try {
+    win.setAlwaysOnTop(true, "floating");
+    if (process.platform === "darwin") {
+      app.dock.show();
+      win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    }
+  } catch (err) {
+    console.warn("[desktop] Quick Chat 浮窗置顶失败:", redactMainLogText(err.message));
+  }
+  if (process.platform === "darwin") {
+    app.focus({ steal: true });
+  }
+  win.show();
+  win.focus();
+  win.webContents.focus();
+  win.webContents.send("quick-chat-shown");
+}
+
+function toggleQuickChatWindow() {
+  if (quickChatWindow && !quickChatWindow.isDestroyed() && quickChatWindow.isVisible() && quickChatWindow.isFocused()) {
+    hideQuickChatWindow();
+    return;
+  }
+  showQuickChatWindow();
+}
+
+function registerQuickChatShortcut(shortcut = readQuickChatPreferences().shortcut) {
+  if (registeredQuickChatShortcut && registeredQuickChatShortcut !== shortcut) {
+    globalShortcut.unregister(registeredQuickChatShortcut);
+    registeredQuickChatShortcut = null;
+  }
+
+  if (!shortcut || typeof shortcut !== "string") {
+    return { ok: false, shortcut: shortcut || "", error: "invalid shortcut" };
+  }
+
+  if (registeredQuickChatShortcut === shortcut && globalShortcut.isRegistered(shortcut)) {
+    return { ok: true, shortcut };
+  }
+
+  if (registeredQuickChatShortcut) {
+    globalShortcut.unregister(registeredQuickChatShortcut);
+    registeredQuickChatShortcut = null;
+  }
+
+  const ok = globalShortcut.register(shortcut, toggleQuickChatWindow);
+  if (!ok) {
+    return { ok: false, shortcut, error: "shortcut is unavailable" };
+  }
+  registeredQuickChatShortcut = shortcut;
+  return { ok: true, shortcut };
+}
+
+function reloadQuickChatShortcut() {
+  return registerQuickChatShortcut(readQuickChatPreferences().shortcut);
+}
+
+function registerQuickChatShortcutBestEffort() {
+  const result = reloadQuickChatShortcut();
+  if (!result.ok) {
+    console.error("[desktop] Quick Chat 快捷键注册失败:", redactMainLogText(result.error || result.shortcut || "unknown"));
+  }
+  return result;
+}
+
 // ── 创建主窗口 ──
 function createMainWindow() {
   const saved = sanitizeWindowState(loadWindowState(), screen.getAllDisplays(), {
@@ -1228,7 +1804,7 @@ function createMainWindow() {
     height: saved?.height || 820,
     minWidth: 420,
     minHeight: 500,
-    title: "Hanako",
+    title: "HanaAgent",
     ...titleBarOpts({ x: 16, y: 16 }),
     backgroundColor: getThemeBackgroundColor(initialTheme),
     show: false,
@@ -1245,7 +1821,8 @@ function createMainWindow() {
     opts.y = saved.y;
   }
 
-  mainWindow = new BrowserWindow(opts);
+  mainWindow = createBrowserWindowWithDiagnostics("main", opts, { windowsMinimalRetry: true });
+  attachRendererLaunchDiagnostics(mainWindow, "main");
   applyWindowThemeColors(mainWindow, initialTheme);
 
   // auto-updater 是进程级服务：初始化只做一次，窗口重建时只更新目标 window 引用。
@@ -1269,6 +1846,12 @@ function createMainWindow() {
   const initTimeout = setTimeout(() => {
     if (_startHiddenAtLogin) return;
     console.warn("[desktop] ⚠ 主窗口初始化超时（30s），强制显示");
+    writeDesktopLaunchDiagnostic("app-ready-timeout", {
+      label: "main",
+      timeoutMs: 30000,
+      visible: mainWindow && !mainWindow.isDestroyed() ? mainWindow.isVisible() : false,
+      url: mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.getURL() : "",
+    });
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
       mainWindow.show();
     }
@@ -1329,6 +1912,7 @@ function createMainWindow() {
       // 同时隐藏子窗口
       if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.hide();
       if (browserViewerWindow && !browserViewerWindow.isDestroyed()) browserViewerWindow.hide();
+      hideQuickChatWindow();
       // 派生 viewer 跟着主窗口一起隐藏（不保留后台 viewer）
       for (const [, vw] of _viewerWindows) {
         if (vw && !vw.isDestroyed()) vw.hide();
@@ -1346,6 +1930,10 @@ function createMainWindow() {
     if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
       browserViewerWindow.destroy();
       browserViewerWindow = null;
+    }
+    if (quickChatWindow && !quickChatWindow.isDestroyed()) {
+      quickChatWindow.destroy();
+      quickChatWindow = null;
     }
     // 销毁所有派生 viewer
     for (const [, vw] of _viewerWindows) {
@@ -1404,6 +1992,7 @@ function createSettingsWindow(tab, theme) {
       nodeIntegration: false,
     },
   });
+  attachRendererLaunchDiagnostics(settingsWindow, "settings");
   applyWindowThemeColors(settingsWindow, settingsTheme);
 
   settingsWindow.once("ready-to-show", () => {
@@ -1485,7 +2074,6 @@ function createBrowserViewerWindow(opts = {}) {
     if (shouldShow) {
       browserViewerWindow.show();
       browserViewerWindow.focus();
-      browserViewerWindow.moveTop();
       // 窗口从隐藏变为可见时重算 bounds（隐藏窗口的 getContentSize 可能不准确）
       _updateBrowserViewBounds();
       // 窗口复用时也要 focus WebContentsView，否则滚动/键盘不工作
@@ -1499,15 +2087,15 @@ function createBrowserViewerWindow(opts = {}) {
   }
 
   browserViewerWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: 1440,
+    height: 1080,
     minWidth: 480,
     minHeight: 360,
     title: "Browser",
     ...framelessWindowOpts(),
     backgroundColor: getThemeBackgroundColor(_browserViewerTheme),
     hasShadow: true,
-    show: false,
+    show: shouldShow,
     acceptFirstMouse: true, // macOS: 第一次点击不仅激活窗口，还穿透到内容
     webPreferences: {
       preload: path.join(__dirname, "preload.bundle.cjs"),
@@ -1515,18 +2103,10 @@ function createBrowserViewerWindow(opts = {}) {
       nodeIntegration: false,
     },
   });
+  attachRendererLaunchDiagnostics(browserViewerWindow, "browser-viewer");
   applyWindowThemeColors(browserViewerWindow, _browserViewerTheme);
 
   loadWindowURL(browserViewerWindow, "browser-viewer");
-
-  // 确保浏览器窗口显示在主窗口上方
-  browserViewerWindow.once("ready-to-show", () => {
-    if (shouldShow) {
-      browserViewerWindow.show();
-      browserViewerWindow.focus();
-      browserViewerWindow.moveTop();
-    }
-  });
 
   // HTML 加载完成后，若浏览器已在运行则附加 WebContentsView
   browserViewerWindow.webContents.on("did-finish-load", () => {
@@ -1552,21 +2132,11 @@ function createBrowserViewerWindow(opts = {}) {
   // 窗口从隐藏变为可见时重算 bounds（Windows 隐藏窗口的 getContentSize 可能返回错误值）
   browserViewerWindow.on("show", () => _updateBrowserViewBounds());
 
-  // F12 / Cmd+Option+I 打开浏览器 WebContentsView 的 DevTools
-  browserViewerWindow.webContents.on("before-input-event", (_event, input) => {
-    if (input.type !== "keyDown") return;
-    const isF12 = input.key === "F12";
-    const isCmdOptI = (input.control || input.meta) && input.alt && input.key === "i";
-    if ((isF12 || isCmdOptI) && _browserWebView) {
-      _event.preventDefault();
-      _toggleBrowserDevTools(_browserWebView.webContents);
-    }
-  });
-
   // 窗口获得焦点时，将输入焦点转发到 WebContentsView（否则无法滚动/打字）
   browserViewerWindow.on("focus", () => {
     if (_browserWebView) {
       _browserWebView.webContents.focus();
+      console.log("[browser-viewer] window focus → view.focus(), isFocused:", _browserWebView.webContents.isFocused());
     }
   });
 
@@ -1758,15 +2328,89 @@ const SNAPSHOT_SCRIPT = `(function() {
   };
 })()`;
 
-/** 按 sessionPath 查找 view，fallback 到当前活跃 view（兼容旧调用） */
-function _getViewForSession(sessionPath) {
-  if (sessionPath && _browserViews.has(sessionPath)) {
-    const view = _browserViews.get(sessionPath);
-    if (_isBrowserViewDestroyed(view)) {
-      _forgetBrowserView(view, "destroyed");
+const DEFAULT_BROWSER_WORKSPACE_KEY = "__hana_default_browser__";
+
+function _browserWorkspaceKey(sessionPath) {
+  return sessionPath || DEFAULT_BROWSER_WORKSPACE_KEY;
+}
+
+function _newBrowserTabId() {
+  return `tab-${crypto.randomUUID()}`;
+}
+
+function _createBrowserWorkspace(sessionPath) {
+  return {
+    sessionPath: sessionPath || null,
+    activeTabId: null,
+    tabs: new Map(),
+  };
+}
+
+function _getBrowserWorkspace(sessionPath) {
+  return _browserViews.get(_browserWorkspaceKey(sessionPath)) || null;
+}
+
+function _ensureBrowserWorkspace(sessionPath) {
+  const key = _browserWorkspaceKey(sessionPath);
+  let workspace = _browserViews.get(key);
+  if (!workspace) {
+    workspace = _createBrowserWorkspace(sessionPath);
+    _browserViews.set(key, workspace);
+  }
+  return workspace;
+}
+
+function _tabTitleFromWebContents(view) {
+  const title = view?.webContents?.getTitle?.();
+  return typeof title === "string" && title.trim() ? title.trim() : "New Tab";
+}
+
+function _tabUrlFromWebContents(view) {
+  const url = view?.webContents?.getURL?.();
+  return typeof url === "string" && url.length > 0 ? url : null;
+}
+
+function _serializeBrowserTab(tab) {
+  const view = tab.view;
+  return {
+    tabId: tab.tabId,
+    title: _tabTitleFromWebContents(view) || tab.title || "New Tab",
+    url: _tabUrlFromWebContents(view) || tab.url || null,
+    canGoBack: !!view?.webContents?.canGoBack?.(),
+    canGoForward: !!view?.webContents?.canGoForward?.(),
+    createdAt: tab.createdAt,
+    updatedAt: Date.now(),
+  };
+}
+
+function _serializeBrowserWorkspace(workspace) {
+  const tabs = Array.from(workspace?.tabs?.values?.() || []).map(_serializeBrowserTab);
+  const activeTabId = workspace?.activeTabId && tabs.some(tab => tab.tabId === workspace.activeTabId)
+    ? workspace.activeTabId
+    : tabs[0]?.tabId || null;
+  return {
+    sessionPath: workspace?.sessionPath || null,
+    activeTabId,
+    tabs,
+  };
+}
+
+function _activeBrowserTabRecord(workspace) {
+  if (!workspace || !workspace.tabs || workspace.tabs.size === 0) return null;
+  return workspace.tabs.get(workspace.activeTabId) || workspace.tabs.values().next().value || null;
+}
+
+/** 按 sessionPath 查找当前 active tab view，fallback 到当前活跃 view（兼容旧调用） */
+function _getViewForSession(sessionPath, tabId = null) {
+  const workspace = _getBrowserWorkspace(sessionPath);
+  if (workspace) {
+    const tab = tabId ? workspace.tabs.get(tabId) : _activeBrowserTabRecord(workspace);
+    if (!tab) return null;
+    if (_isBrowserViewDestroyed(tab.view)) {
+      _forgetBrowserView(tab.view, "destroyed");
       return null;
     }
-    return view;
+    return tab.view;
   }
   if (_browserWebView && _isBrowserViewDestroyed(_browserWebView)) {
     _forgetBrowserView(_browserWebView, "destroyed");
@@ -1776,10 +2420,21 @@ function _getViewForSession(sessionPath) {
 }
 
 /** 确保指定 session 有 browser view */
-function _ensureBrowserForSession(sessionPath) {
-  const view = _getViewForSession(sessionPath);
+function _ensureBrowserForSession(sessionPath, tabId = null) {
+  const view = _getViewForSession(sessionPath, tabId);
   if (!view) throw new Error("No browser instance" + (sessionPath ? ` for session ${sessionPath}` : ""));
   return view;
+}
+
+function _ensureBrowserTabForSession(sessionPath, tabId = null) {
+  const workspace = _ensureBrowserWorkspace(sessionPath);
+  let tab = tabId ? workspace.tabs.get(tabId) : _activeBrowserTabRecord(workspace);
+  if (!tab) {
+    tab = _createBrowserTabRecord(sessionPath, { tabId });
+    workspace.tabs.set(tab.tabId, tab);
+    workspace.activeTabId = tab.tabId;
+  }
+  return tab;
 }
 
 function _ensureBrowser() {
@@ -1808,23 +2463,32 @@ function _isBrowserViewDestroyed(view) {
   }
 }
 
+function _detachActiveBrowserView({ view = _browserWebView, sessionPath = _currentBrowserSession, destroy = false, hideIfVisible = false, reason = null } = {}) {
+  if (!view || view !== _browserWebView) return false;
+  if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
+    try { browserViewerWindow.contentView.removeChildView(view); } catch {}
+  }
+  _browserWebView = null;
+  _currentBrowserSession = null;
+  _currentBrowserTabId = null;
+  if (destroy) {
+    try { if (!view.webContents.isDestroyed()) view.webContents.close(); } catch {}
+    _removeBrowserTabRecord(view);
+  }
+  if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
+    browserViewerWindow.webContents.send("browser-update", { running: false, reason });
+    if (hideIfVisible) browserViewerWindow.hide();
+  }
+  return true;
+}
+
 function _forgetBrowserView(view, reason) {
   if (!view) return;
   const wasActive = view === _browserWebView;
-  if (wasActive && browserViewerWindow && !browserViewerWindow.isDestroyed()) {
-    try { browserViewerWindow.contentView.removeChildView(view); } catch {}
-  }
-  for (const [sp, candidate] of _browserViews) {
-    if (candidate === view) _browserViews.delete(sp);
-  }
+  const activeSessionPath = wasActive ? _currentBrowserSession : null;
+  if (wasActive) _detachActiveBrowserView({ view, sessionPath: activeSessionPath, hideIfVisible: true, reason });
+  _removeBrowserTabRecord(view);
   try { if (!view.webContents.isDestroyed()) view.webContents.close(); } catch {}
-  if (wasActive) {
-    _browserWebView = null;
-    _currentBrowserSession = null;
-    if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
-      browserViewerWindow.webContents.send("browser-update", { running: false, reason });
-    }
-  }
 }
 
 function _bindBrowserViewLifecycle(view, sessionPath) {
@@ -1838,6 +2502,146 @@ function _bindBrowserViewLifecycle(view, sessionPath) {
   if (sessionPath && _isBrowserViewDestroyed(view)) forget("destroyed");
 }
 
+function _removeBrowserTabRecord(view) {
+  if (!view) return null;
+  for (const [key, workspace] of _browserViews) {
+    for (const [tabId, tab] of workspace.tabs) {
+      if (tab.view !== view) continue;
+      workspace.tabs.delete(tabId);
+      if (workspace.activeTabId === tabId) {
+        workspace.activeTabId = workspace.tabs.keys().next().value || null;
+      }
+      if (workspace.tabs.size === 0) _browserViews.delete(key);
+      return { workspace, tabId };
+    }
+  }
+  return null;
+}
+
+function _browserSession() {
+  return session.fromPartition("persist:hana-browser");
+}
+
+function _installBrowserCookiePolicy() {
+  if (_browserCookiePolicyInstalled) return;
+  _browserCookiePolicyInstalled = true;
+  const ses = _browserSession();
+  ses.webRequest.onBeforeSendHeaders((details, callback) => {
+    if (_browserAcceptCookies) {
+      callback({ requestHeaders: details.requestHeaders });
+      return;
+    }
+    const requestHeaders = { ...(details.requestHeaders || {}) };
+    for (const key of Object.keys(requestHeaders)) {
+      if (key.toLowerCase() === "cookie") delete requestHeaders[key];
+    }
+    callback({ requestHeaders });
+  });
+  ses.webRequest.onHeadersReceived((details, callback) => {
+    if (_browserAcceptCookies) {
+      callback({ responseHeaders: details.responseHeaders });
+      return;
+    }
+    const responseHeaders = { ...(details.responseHeaders || {}) };
+    for (const key of Object.keys(responseHeaders)) {
+      if (key.toLowerCase() === "set-cookie") delete responseHeaders[key];
+    }
+    callback({ responseHeaders });
+  });
+}
+
+function _setBrowserAcceptCookies(enabled) {
+  _browserAcceptCookies = enabled !== false;
+  _installBrowserCookiePolicy();
+}
+
+async function _clearBrowserCookiesAndSiteData() {
+  const ses = _browserSession();
+  await ses.clearStorageData({
+    storages: ["cookies", "localstorage", "indexdb", "serviceworkers", "cachestorage"],
+  });
+}
+
+function _createBrowserWebContentsView(sessionPath, tabId = null) {
+  _installBrowserCookiePolicy();
+  const ses = session.fromPartition("persist:hana-browser");
+  const view = new WebContentsView({
+    webPreferences: {
+      session: ses,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  view.webContents.setAudioMuted(true);
+  view.webContents.on("did-navigate", (_e, url) => {
+    if (view === _browserWebView) _notifyViewerUrl(url);
+  });
+  view.webContents.on("did-navigate-in-page", (_e, url) => {
+    if (view === _browserWebView) _notifyViewerUrl(url);
+  });
+  view.webContents.setWindowOpenHandler(({ url }) => {
+    if (isAllowedBrowserUrl(url)) {
+      _openUrlInNewBrowserTab(sessionPath, url, { show: view === _browserWebView });
+    }
+    return { action: "deny" };
+  });
+  view.webContents.on("page-title-updated", () => {
+    if (view === _browserWebView) _notifyViewerUrl(view.webContents.getURL());
+  });
+  view.setBorderRadius(10);
+  _bindBrowserViewLifecycle(view, sessionPath);
+  return view;
+}
+
+function _createBrowserTabRecord(sessionPath, seed = {}) {
+  const tabId = seed.tabId || _newBrowserTabId();
+  const view = _createBrowserWebContentsView(sessionPath, tabId);
+  const now = Date.now();
+  return {
+    tabId,
+    view,
+    title: seed.title || "New Tab",
+    url: seed.url || null,
+    createdAt: seed.createdAt || now,
+    updatedAt: seed.updatedAt || now,
+  };
+}
+
+function _switchActiveBrowserTab(sessionPath, tabId) {
+  const workspace = _getBrowserWorkspace(sessionPath);
+  if (!workspace || !workspace.tabs.has(tabId)) return null;
+  const tab = workspace.tabs.get(tabId);
+  workspace.activeTabId = tabId;
+  if (_browserWebView !== tab.view) {
+    if (_browserWebView && browserViewerWindow && !browserViewerWindow.isDestroyed()) {
+      try { browserViewerWindow.contentView.removeChildView(_browserWebView); } catch {}
+    }
+    _browserWebView = tab.view;
+    _currentBrowserSession = workspace.sessionPath;
+    _currentBrowserTabId = tabId;
+    if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
+      browserViewerWindow.contentView.addChildView(tab.view);
+      _updateBrowserViewBounds();
+    }
+  }
+  _notifyViewerUrl(_tabUrlFromWebContents(tab.view) || tab.url || "");
+  return tab;
+}
+
+async function _openUrlInNewBrowserTab(sessionPath, url, options = {}) {
+  const show = options.show !== false;
+  const workspace = _ensureBrowserWorkspace(sessionPath);
+  const tab = _createBrowserTabRecord(sessionPath, { url });
+  workspace.tabs.set(tab.tabId, tab);
+  workspace.activeTabId = tab.tabId;
+  if (show) _switchActiveBrowserTab(sessionPath, tab.tabId);
+  if (url && isAllowedBrowserUrl(url)) await tab.view.webContents.loadURL(url);
+  if (tab.view === _browserWebView) _notifyViewerUrl(tab.view.webContents.getURL());
+  return _serializeBrowserWorkspace(workspace);
+}
+
 function _ensureLiveWebContents(view, sessionPath) {
   if (_isBrowserViewDestroyed(view)) {
     _forgetBrowserView(view, "destroyed");
@@ -1846,8 +2650,8 @@ function _ensureLiveWebContents(view, sessionPath) {
   return view.webContents;
 }
 
-async function _withLiveWebContents(sessionPath, fn) {
-  const view = _ensureBrowserForSession(sessionPath);
+async function _withLiveWebContents(sessionPath, fn, tabId = null) {
+  const view = _ensureBrowserForSession(sessionPath, tabId);
   const wc = _ensureLiveWebContents(view, sessionPath);
   try {
     return await fn(wc, view);
@@ -1864,16 +2668,14 @@ function _delay(ms) {
 }
 
 
+// DevTools: docked right + toggle 刷新渲染层级，解决 WebContentsView 遮挡问题
 function _toggleBrowserDevTools(targetWebContents) {
   if (!targetWebContents || targetWebContents.isDestroyed()) return;
   if (targetWebContents.isDevToolsOpened()) {
     targetWebContents.closeDevTools();
   } else {
-    // docked right 模式：Chromium 自动从 view 内部分配 DevTools 空间
-    // 但 WebContentsView 渲染层会遮挡 DevTools，打开后需要 toggle 刷新渲染层级
     targetWebContents.openDevTools({ mode: "right" });
     targetWebContents.once("devtools-opened", () => {
-      // 关闭再打开，刷新渲染层级让 DevTools 不被遮挡
       targetWebContents.closeDevTools();
       setTimeout(() => {
         if (!targetWebContents.isDestroyed()) {
@@ -1889,11 +2691,10 @@ function _updateBrowserViewBounds() {
   const [width, height] = browserViewerWindow.getContentSize();
   // 卡片式布局：四周留边距
   const mx = 8, mt = 4, mb = 8;
-  let viewWidth = Math.max(0, width - mx * 2);
   const bounds = {
     x: mx,
     y: TITLEBAR_HEIGHT + mt,
-    width: viewWidth,
+    width: Math.max(0, width - mx * 2),
     height: Math.max(0, height - TITLEBAR_HEIGHT - mt - mb),
   };
   if (bounds.width === 0 || bounds.height === 0) {
@@ -1904,11 +2705,16 @@ function _updateBrowserViewBounds() {
 
 function _notifyViewerUrl(url) {
   if (browserViewerWindow && !browserViewerWindow.isDestroyed() && _browserWebView) {
+    const workspace = _getBrowserWorkspace(_currentBrowserSession);
+    const serialized = _serializeBrowserWorkspace(workspace);
     browserViewerWindow.webContents.send("browser-update", {
       url,
       title: _browserWebView.webContents.getTitle(),
       canGoBack: _browserWebView.webContents.canGoBack(),
       canGoForward: _browserWebView.webContents.canGoForward(),
+      sessionPath: _currentBrowserSession,
+      activeTabId: _currentBrowserTabId || serialized.activeTabId,
+      tabs: serialized.tabs,
     });
   }
 }
@@ -1991,7 +2797,10 @@ async function handleBrowserCommand(cmd, params) {
             reject(new Error(`Search navigation timed out after ${NAV_TIMEOUT / 1000}s: ${searchUrl}`));
           }, NAV_TIMEOUT)),
         ]);
-        await _delay(800);
+        const wait = await waitForBrowserState(view.webContents, {
+          state: params.state || "stable",
+          timeoutMs: Math.min(Number(params.timeout) || 5000, 10000),
+        });
         const extracted = await view.webContents.executeJavaScript(
           buildBrowserSearchExtractionScript(provider, maxResults),
         );
@@ -2009,6 +2818,7 @@ async function handleBrowserCommand(cmd, params) {
             captcha: !!extracted.captcha,
             reason: extracted.reason || "",
             elapsed_ms: Date.now() - started,
+            wait,
           },
         };
       } finally {
@@ -2019,75 +2829,35 @@ async function handleBrowserCommand(cmd, params) {
     // ── launch ──
     case "launch": {
       const sp = params.sessionPath || null;
-      // 该 session 已有 view → 直接返回
-      if (sp && _browserViews.has(sp)) {
-        const existingView = _getViewForSession(sp);
-        if (existingView) return {};
+      _setBrowserAcceptCookies(params.acceptCookies !== false);
+      const workspace = _ensureBrowserWorkspace(sp);
+      if (workspace.tabs.size > 0) {
+        return _serializeBrowserWorkspace(workspace);
       }
-      // 无 sessionPath 且已有活跃 view → 直接返回（兼容旧调用）
-      if (!sp && _browserWebView && !_isBrowserViewDestroyed(_browserWebView)) return {};
-
-      const ses = session.fromPartition("persist:hana-browser");
-      const view = new WebContentsView({
-        webPreferences: {
-          session: ses,
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: true,
-        },
-      });
-
-      // 默认静音
-      view.webContents.setAudioMuted(true);
-
-      // 监听导航事件，实时更新 URL 栏（只在该 view 是活跃 view 时通知）
-      view.webContents.on("did-navigate", (_e, url) => {
-        if (view === _browserWebView) _notifyViewerUrl(url);
-      });
-      view.webContents.on("did-navigate-in-page", (_e, url) => {
-        if (view === _browserWebView) _notifyViewerUrl(url);
-      });
-
-      // 在新窗口中打开链接（target=_blank）时，在当前视图中打开
-      view.webContents.setWindowOpenHandler(({ url }) => {
-        if (isAllowedBrowserUrl(url)) {
-          view.webContents.loadURL(url);
+      const restoreTabs = Array.isArray(params.tabs) && params.tabs.length > 0
+        ? params.tabs
+        : [{ tabId: params.tabId || undefined, url: null, title: "New Tab" }];
+      for (const seed of restoreTabs) {
+        const tab = _createBrowserTabRecord(sp, seed || {});
+        workspace.tabs.set(tab.tabId, tab);
+        if (seed?.url && isAllowedBrowserUrl(seed.url)) {
+          tab.view.webContents.loadURL(seed.url).catch(() => {});
         }
-        return { action: "deny" };
-      });
+      }
+      workspace.activeTabId = params.activeTabId && workspace.tabs.has(params.activeTabId)
+        ? params.activeTabId
+        : workspace.tabs.keys().next().value || null;
 
-      // F12 / Cmd+Option+I 打开 DevTools
-      view.webContents.on("before-input-event", (_event, input) => {
-        if (input.type !== "keyDown") return;
-        const isF12 = input.key === "F12";
-        const isCmdOptI = (input.control || input.meta) && input.alt && input.key === "i";
-        if (isF12 || isCmdOptI) {
-          _event.preventDefault();
-          _toggleBrowserDevTools(view.webContents);
-        }
-      });
-
-      // 页面标题变化时更新标题栏（只在该 view 是活跃 view 时通知）
-      view.webContents.on("page-title-updated", () => {
-        if (view === _browserWebView) _notifyViewerUrl(view.webContents.getURL());
-      });
-
-      // 卡片圆角
-      view.setBorderRadius(10);
-      _bindBrowserViewLifecycle(view, sp);
-
-      // 存入 Map
-      if (sp) _browserViews.set(sp, view);
-
-      // 如果当前没有活跃 view，设为活跃（挂载到窗口）
       if (!_browserWebView) {
-        _browserWebView = view;
+        const activeTab = _activeBrowserTabRecord(workspace);
+        _browserWebView = activeTab?.view || null;
         _currentBrowserSession = sp;
+        _currentBrowserTabId = activeTab?.tabId || null;
 
         // 始终静默创建窗口（不弹出），等用户手动点击才 show
         createBrowserViewerWindow({ show: false });
         // 如果 HTML 已加载完毕（窗口复用），did-finish-load 不会再触发，手动挂载
-        if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
+        if (_browserWebView && browserViewerWindow && !browserViewerWindow.isDestroyed()) {
           try { browserViewerWindow.contentView.removeChildView(_browserWebView); } catch {}
           browserViewerWindow.contentView.addChildView(_browserWebView);
           _updateBrowserViewBounds();
@@ -2100,28 +2870,22 @@ async function handleBrowserCommand(cmd, params) {
         }
       }
       // 否则，新 view 只存在 Map 中，不挂载到窗口（后台可操作）
-      return {};
+      return _serializeBrowserWorkspace(workspace);
     }
 
     // ── close ──（真正销毁指定 session 的浏览器实例）
     case "close": {
       const sp = params.sessionPath;
-      const view = sp ? _getViewForSession(sp) : _browserWebView;
-      if (view) {
-        // 如果是当前活跃 view，从窗口移除
-        if (view === _browserWebView) {
-          if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
-            try { browserViewerWindow.contentView.removeChildView(view); } catch {}
-          }
-          _browserWebView = null;
-          _currentBrowserSession = null;
+      const workspace = _getBrowserWorkspace(sp);
+      if (workspace) {
+        const active = _activeBrowserTabRecord(workspace);
+        if (active?.view === _browserWebView) {
+          _detachActiveBrowserView({ view: active.view, sessionPath: sp || _currentBrowserSession, destroy: false, hideIfVisible: true });
         }
-        try { if (!view.webContents.isDestroyed()) view.webContents.close(); } catch {}
-        if (sp) _browserViews.delete(sp);
-      }
-      // 通知浮窗状态变化，但不自动隐藏（让用户自己决定关不关）
-      if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
-        browserViewerWindow.webContents.send("browser-update", { running: false });
+        for (const tab of workspace.tabs.values()) {
+          try { if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close(); } catch {}
+        }
+        _browserViews.delete(_browserWorkspaceKey(sp));
       }
       return {};
     }
@@ -2131,16 +2895,7 @@ async function handleBrowserCommand(cmd, params) {
       const sp = params.sessionPath;
       const view = sp ? _getViewForSession(sp) : _browserWebView;
       if (view && view === _browserWebView) {
-        // 只有当前活跃 view 需要从窗口摘下
-        if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
-          try { browserViewerWindow.contentView.removeChildView(view); } catch {}
-        }
-        _browserWebView = null;
-        _currentBrowserSession = null;
-      }
-      // 非活跃 view 本来就不在窗口上，suspend 是 no-op（view 留在 Map 里）
-      if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
-        browserViewerWindow.webContents.send("browser-update", { running: false });
+        _detachActiveBrowserView({ view, sessionPath: sp || _currentBrowserSession, hideIfVisible: true });
       }
       return {};
     }
@@ -2148,13 +2903,19 @@ async function handleBrowserCommand(cmd, params) {
     // ── resume ──（把挂起的 view 挂回窗口，但不自动弹出）
     case "resume": {
       const sp = params.sessionPath;
-      if (!sp || !_browserViews.has(sp)) {
+      const workspace = _getBrowserWorkspace(sp);
+      if (!sp || !workspace || workspace.tabs.size === 0) {
         return { found: false };
       }
-      const view = _getViewForSession(sp);
+      const tabId = params.tabId || workspace.activeTabId;
+      const view = _getViewForSession(sp, tabId);
       if (!view) return { found: false };
+      if (_browserWebView && _browserWebView !== view && browserViewerWindow && !browserViewerWindow.isDestroyed()) {
+        try { browserViewerWindow.contentView.removeChildView(_browserWebView); } catch {}
+      }
       _browserWebView = view;
       _currentBrowserSession = sp;
+      _currentBrowserTabId = tabId;
 
       // 挂载 view 到窗口（不 show，等用户手动打开）
       createBrowserViewerWindow({ show: false });
@@ -2167,7 +2928,68 @@ async function handleBrowserCommand(cmd, params) {
       // 通知标题栏更新
       const url = view.webContents.getURL();
       if (url) _notifyViewerUrl(url);
-      return { found: true, url };
+      return { found: true, url, ..._serializeBrowserWorkspace(workspace) };
+    }
+
+    case "newTab": {
+      const sp = params.sessionPath || null;
+      const workspace = _ensureBrowserWorkspace(sp);
+      const tab = _createBrowserTabRecord(sp, { url: params.url || null });
+      workspace.tabs.set(tab.tabId, tab);
+      workspace.activeTabId = tab.tabId;
+      const shouldShow = _currentBrowserSession === sp || !_browserWebView;
+      if (shouldShow) {
+        _switchActiveBrowserTab(sp, tab.tabId);
+      }
+      if (params.url && isAllowedBrowserUrl(params.url)) {
+        await tab.view.webContents.loadURL(params.url);
+      }
+      if (tab.view === _browserWebView) _notifyViewerUrl(tab.view.webContents.getURL());
+      return _serializeBrowserWorkspace(workspace);
+    }
+
+    case "switchTab": {
+      const sp = params.sessionPath || null;
+      const workspace = _getBrowserWorkspace(sp);
+      if (!workspace || !workspace.tabs.has(params.tabId)) {
+        throw new Error(`No browser tab ${params.tabId}`);
+      }
+      _switchActiveBrowserTab(sp, params.tabId);
+      return _serializeBrowserWorkspace(workspace);
+    }
+
+    case "closeTab": {
+      const sp = params.sessionPath || null;
+      const workspace = _getBrowserWorkspace(sp);
+      if (!workspace || !workspace.tabs.has(params.tabId)) {
+        throw new Error(`No browser tab ${params.tabId}`);
+      }
+      const tab = workspace.tabs.get(params.tabId);
+      const tabIds = Array.from(workspace.tabs.keys());
+      const closedIndex = tabIds.indexOf(params.tabId);
+      const nextTabId = tabIds[closedIndex + 1] || tabIds[closedIndex - 1] || null;
+      if (tab.view === _browserWebView) {
+        _detachActiveBrowserView({ view: tab.view, sessionPath: sp, destroy: false, hideIfVisible: false });
+      }
+      workspace.tabs.delete(params.tabId);
+      try { if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close(); } catch {}
+      if (workspace.tabs.size === 0) {
+        _browserViews.delete(_browserWorkspaceKey(sp));
+        if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
+          browserViewerWindow.webContents.send("browser-update", {
+            running: false,
+            sessionPath: sp,
+            activeTabId: null,
+            tabs: [],
+          });
+        }
+        return { activeTabId: null, tabs: [] };
+      }
+      workspace.activeTabId = nextTabId && workspace.tabs.has(nextTabId)
+        ? nextTabId
+        : workspace.tabs.keys().next().value;
+      _switchActiveBrowserTab(sp, workspace.activeTabId);
+      return _serializeBrowserWorkspace(workspace);
     }
 
     // ── navigate ──
@@ -2184,26 +3006,42 @@ async function handleBrowserCommand(cmd, params) {
             reject(new Error(`Navigation timed out after ${NAV_TIMEOUT / 1000}s: ${params.url}`));
           }, NAV_TIMEOUT)),
         ]);
-        await _delay(500);
+        const wait = await waitForBrowserState(wc, {
+          state: params.state || "stable",
+          timeoutMs: Math.min(Number(params.timeout) || 5000, 10000),
+        });
         const snap = await wc.executeJavaScript(SNAPSHOT_SCRIPT);
-        return { url: snap.currentUrl, title: snap.title, snapshot: snap.text };
-      });
+        return {
+          url: snap.currentUrl,
+          title: snap.title,
+          snapshot: snap.text,
+          tabId: params.tabId || _currentBrowserTabId,
+          canGoBack: wc.canGoBack(),
+          canGoForward: wc.canGoForward(),
+          diagnostics: { wait },
+        };
+      }, params.tabId || null);
     }
 
     // ── snapshot ──
     case "snapshot": {
       return await _withLiveWebContents(params.sessionPath, async (wc) => {
         const snap = await wc.executeJavaScript(SNAPSHOT_SCRIPT);
-        return { currentUrl: snap.currentUrl, text: snap.text };
-      });
+        return {
+          currentUrl: snap.currentUrl,
+          title: snap.title,
+          tabId: params.tabId || _currentBrowserTabId,
+          text: snap.text,
+        };
+      }, params.tabId || null);
     }
 
     // ── screenshot ──
     case "screenshot": {
       return await _withLiveWebContents(params.sessionPath, async (wc) => {
         const img = await wc.capturePage();
-        return { base64: encodeCapturedPageToJpegBase64(img, 75, "screenshot") };
-      });
+        return { base64: encodeCapturedPageToJpegBase64(img, 75, "screenshot"), tabId: params.tabId || _currentBrowserTabId };
+      }, params.tabId || null);
     }
 
     // ── thumbnail ──
@@ -2212,7 +3050,7 @@ async function handleBrowserCommand(cmd, params) {
         const img = await wc.capturePage();
         const resized = img.resize({ width: 400 });
         return { base64: encodeCapturedPageToJpegBase64(resized, 60, "thumbnail") };
-      });
+      }, params.tabId || null);
     }
 
     // ── click ──
@@ -2226,8 +3064,8 @@ async function handleBrowserCommand(cmd, params) {
         );
         await _delay(800);
         const snap = await wc.executeJavaScript(SNAPSHOT_SCRIPT);
-        return { currentUrl: snap.currentUrl, text: snap.text };
-      });
+        return { currentUrl: snap.currentUrl, title: snap.title, tabId: params.tabId || _currentBrowserTabId, text: snap.text };
+      }, params.tabId || null);
     }
 
     // ── type ──
@@ -2252,8 +3090,8 @@ async function handleBrowserCommand(cmd, params) {
         }
         await _delay(300);
         const snap = await wc.executeJavaScript(SNAPSHOT_SCRIPT);
-        return { currentUrl: snap.currentUrl, text: snap.text };
-      });
+        return { currentUrl: snap.currentUrl, title: snap.title, tabId: params.tabId || _currentBrowserTabId, text: snap.text };
+      }, params.tabId || null);
     }
 
     // ── scroll ──
@@ -2263,8 +3101,8 @@ async function handleBrowserCommand(cmd, params) {
         await wc.executeJavaScript("window.scrollBy({top:" + delta + ",behavior:'smooth'})");
         await _delay(500);
         const snap = await wc.executeJavaScript(SNAPSHOT_SCRIPT);
-        return { currentUrl: snap.currentUrl, text: snap.text };
-      });
+        return { currentUrl: snap.currentUrl, title: snap.title, tabId: params.tabId || _currentBrowserTabId, text: snap.text };
+      }, params.tabId || null);
     }
 
     // ── select ──
@@ -2280,8 +3118,8 @@ async function handleBrowserCommand(cmd, params) {
         );
         await _delay(300);
         const snap = await wc.executeJavaScript(SNAPSHOT_SCRIPT);
-        return { currentUrl: snap.currentUrl, text: snap.text };
-      });
+        return { currentUrl: snap.currentUrl, title: snap.title, tabId: params.tabId || _currentBrowserTabId, text: snap.text };
+      }, params.tabId || null);
     }
 
     // ── pressKey ──
@@ -2296,18 +3134,21 @@ async function handleBrowserCommand(cmd, params) {
         wc.sendInputEvent({ type: "keyUp", keyCode: mappedKey, modifiers });
         await _delay(300);
         const snap = await wc.executeJavaScript(SNAPSHOT_SCRIPT);
-        return { currentUrl: snap.currentUrl, text: snap.text };
-      });
+        return { currentUrl: snap.currentUrl, title: snap.title, tabId: params.tabId || _currentBrowserTabId, text: snap.text };
+      }, params.tabId || null);
     }
 
     // ── wait ──
     case "wait": {
       return await _withLiveWebContents(params.sessionPath, async (wc) => {
         const timeout = Math.min(params.timeout || 5000, 10000);
-        await _delay(timeout);
+        const wait = await waitForBrowserState(wc, {
+          state: params.state || "stable",
+          timeoutMs: timeout,
+        });
         const snap = await wc.executeJavaScript(SNAPSHOT_SCRIPT);
-        return { currentUrl: snap.currentUrl, text: snap.text };
-      });
+        return { currentUrl: snap.currentUrl, title: snap.title, tabId: params.tabId || _currentBrowserTabId, text: snap.text, diagnostics: { wait } };
+      }, params.tabId || null);
     }
 
     // ── evaluate ──
@@ -2319,15 +3160,21 @@ async function handleBrowserCommand(cmd, params) {
       return await _withLiveWebContents(params.sessionPath, async (wc) => {
         const result = await wc.executeJavaScript(params.expression);
         const serialized = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-        return { value: serialized || "undefined" };
-      });
+        return { value: serialized || "undefined", tabId: params.tabId || _currentBrowserTabId };
+      }, params.tabId || null);
     }
 
     // ── show ──（按 sessionPath 切换显示的 view 并弹出窗口）
     case "show": {
       const sp = params.sessionPath;
-      const view = sp ? _getViewForSession(sp) : _browserWebView;
+      const tabId = params.tabId || null;
+      const view = sp ? _getViewForSession(sp, tabId) : _browserWebView;
       if (!view) return {};
+      const workspace = _getBrowserWorkspace(sp);
+      const activeRecord = workspace
+        ? (tabId ? workspace.tabs.get(tabId) : _activeBrowserTabRecord(workspace))
+        : null;
+      if (workspace && activeRecord) workspace.activeTabId = activeRecord.tabId;
 
       // 如果不是当前活跃 view，先切换
       if (view !== _browserWebView) {
@@ -2337,6 +3184,7 @@ async function handleBrowserCommand(cmd, params) {
         }
         _browserWebView = view;
         _currentBrowserSession = sp;
+        _currentBrowserTabId = activeRecord?.tabId || tabId || null;
         if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
           browserViewerWindow.contentView.addChildView(view);
           _updateBrowserViewBounds();
@@ -2354,32 +3202,37 @@ async function handleBrowserCommand(cmd, params) {
       } else {
         _browserWebView = view;
         _currentBrowserSession = sp;
+        _currentBrowserTabId = activeRecord?.tabId || tabId || _currentBrowserTabId;
         createBrowserViewerWindow();
       }
-      return {};
+      _notifyViewerUrl(view.webContents.getURL());
+      return workspace ? _serializeBrowserWorkspace(workspace) : {};
     }
 
     // ── destroyView ──（销毁指定 session 的挂起 view）
     case "destroyView": {
       const sp = params.sessionPath;
-      if (sp && _browserViews.has(sp)) {
-        const view = _getViewForSession(sp);
-        if (!view) return {};
-        if (view === _browserWebView) {
-          if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
-            try { browserViewerWindow.contentView.removeChildView(view); } catch {}
+      const workspace = _getBrowserWorkspace(sp);
+      if (workspace) {
+        for (const tab of workspace.tabs.values()) {
+          if (tab.view === _browserWebView) {
+            _detachActiveBrowserView({ view: tab.view, sessionPath: sp, destroy: false, hideIfVisible: true });
           }
-          _browserWebView = null;
-          _currentBrowserSession = null;
-          if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
-            browserViewerWindow.webContents.send("browser-update", { running: false });
-            browserViewerWindow.hide();
-          }
+          try { if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close(); } catch {}
         }
-        try { if (!view.webContents.isDestroyed()) view.webContents.close(); } catch {}
-        _browserViews.delete(sp);
+        _browserViews.delete(_browserWorkspaceKey(sp));
       }
       return {};
+    }
+
+    case "setAcceptCookies": {
+      _setBrowserAcceptCookies(params.enabled !== false);
+      return { ok: true, acceptCookies: _browserAcceptCookies };
+    }
+
+    case "clearBrowserCookiesAndSiteData": {
+      await _clearBrowserCookiesAndSiteData();
+      return { ok: true };
     }
 
     default:
@@ -2444,7 +3297,7 @@ function createOnboardingWindow(query = {}) {
     height: 780,
     resizable: false,
     frame: false,
-    title: "Hanako",
+    title: "HanaAgent",
     ...titleBarOpts({ x: 16, y: 16 }),
     backgroundColor: getThemeBackgroundColor(initialTheme),
     show: false,
@@ -2454,6 +3307,7 @@ function createOnboardingWindow(query = {}) {
       nodeIntegration: false,
     },
   });
+  attachRendererLaunchDiagnostics(onboardingWindow, "onboarding");
   applyWindowThemeColors(onboardingWindow, initialTheme);
 
   loadWindowURL(onboardingWindow, "onboarding", { query });
@@ -2577,6 +3431,7 @@ function _getScreenshotMd() {
     const taskLists = require("markdown-it-task-lists");
     _screenshotMd.use(taskLists, { enabled: false, label: true });
   } catch { /* task-lists not available */ }
+  decorateScreenshotMarkdownIt(_screenshotMd);
   return _screenshotMd;
 }
 
@@ -2607,7 +3462,8 @@ function buildScreenshotHTML(payload) {
 
   const katexCSS = _getKatexCSS();
 
-  let extraCSS = `:root { --screenshot-page-bg: ${themeConf.backgroundColor}; }`;
+  const screenshotFontFamily = sanitizeScreenshotFontFamily(payload.fontFamily);
+  let extraCSS = `:root { --screenshot-page-bg: ${themeConf.backgroundColor}; --screenshot-font-family: ${screenshotFontFamily}; }`;
   if (themeName.startsWith("sakura-")) {
     const isDesktop = themeName.endsWith("-desktop");
     const branchFile = isDesktop ? "sakura-branch-desktop.png" : "sakura-branch-mobile.png";
@@ -2616,6 +3472,11 @@ function buildScreenshotHTML(payload) {
     const flowerUrl = pathToFileURL(getScreenshotResourcePath("sakura", flowerFile)).href;
     extraCSS += `\n:root { --sakura-branch-url: url('${branchUrl}'); --sakura-flower-url: url('${flowerUrl}'); }`;
   }
+  const isDesktopScreenshotTheme = themeName.endsWith("-desktop");
+  const coverBleedTop = themeName.startsWith("sakura-")
+    ? "5rem"
+    : (isDesktopScreenshotTheme ? "2rem" : "5rem");
+  extraCSS += `\n:root { --screenshot-cover-bleed-top: ${coverBleedTop}; }`;
 
   // Logo 内联为 base64 data URL（asar 内文件无法被离屏窗口的 file:// 加载）
   let logoUrl = "";
@@ -2627,31 +3488,141 @@ function buildScreenshotHTML(payload) {
     logoUrl = `data:image/png;base64,${logoBuf.toString("base64")}`;
   } catch { /* logo 加载失败时水印无图 */ }
 
+  const screenshotAttachmentKinds = new Set(["image", "svg", "video", "audio", "pdf", "doc", "code", "markdown", "directory", "other"]);
+
+  function normalizeScreenshotAttachmentKind(kind) {
+    const normalized = typeof kind === "string" ? kind : "other";
+    return screenshotAttachmentKinds.has(normalized)
+      ? normalized
+      : "other";
+  }
+
+  function renderScreenshotAttachmentIcon(kind) {
+    const common = 'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+    if (kind === "audio") {
+      return `<svg ${common}><path d="M4 10v4"/><path d="M8 7v10"/><path d="M12 5v14"/><path d="M16 8v8"/><path d="M20 11v2"/></svg>`;
+    }
+    if (kind === "markdown") {
+      return `<svg ${common}><path d="M4 5h16v14H4z"/><path d="M7 15V9l3 3 3-3v6"/><path d="M16 9v6"/><path d="M14.5 13.5 16 15l1.5-1.5"/></svg>`;
+    }
+    if (kind === "code") {
+      return `<svg ${common}><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`;
+    }
+    if (kind === "pdf" || kind === "doc" || kind === "other") {
+      return `<svg ${common}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="14" y2="17"/></svg>`;
+    }
+    if (kind === "directory") {
+      return `<svg ${common}><path d="M3 6h6l2 2h10v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`;
+    }
+    if (kind === "video") {
+      return `<svg ${common}><rect x="3" y="5" width="18" height="14" rx="2"/><polygon points="10 9 15 12 10 15 10 9"/></svg>`;
+    }
+    return `<svg ${common}><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`;
+  }
+
+  function renderScreenshotAttachmentStatus(status) {
+    if (status !== "expired") return "";
+    const locale = String(payload.locale || "").toLowerCase();
+    const label = locale.startsWith("zh") ? "已过期" : "expired";
+    return `<span class="chat-attachment-status">${escapeAttr(label)}</span>`;
+  }
+
+  function normalizeScreenshotWaveformPeaks(waveform) {
+    const fallback = [0.28, 0.62, 0.44, 0.82, 0.36, 0.72, 0.32, 0.54, 0.78, 0.44, 0.66, 0.28];
+    if (!waveform || typeof waveform !== "object" || !Array.isArray(waveform.peaks) || !waveform.peaks.length) return fallback;
+    const peaks = waveform.peaks
+      .slice(0, 80)
+      .map((peak) => Number(peak))
+      .filter((peak) => Number.isFinite(peak))
+      .map((peak) => Math.max(0, Math.min(1, peak)));
+    return peaks.length ? peaks : fallback;
+  }
+
+  function renderScreenshotAudioWave(waveform) {
+    return normalizeScreenshotWaveformPeaks(waveform)
+      .map((peak) => `<span style="height:${Math.max(4, Math.round(4 + peak * 18))}px"></span>`)
+      .join("");
+  }
+
+  function renderScreenshotAudioCard(b, { name, statusHTML, expiredClass, showName }) {
+    return `
+      <span class="chat-audio-card${expiredClass}" title="${escapeAttr(name)}">
+        <span class="chat-audio-play">${renderScreenshotAttachmentIcon("audio")}</span>
+        <span class="chat-audio-wave" aria-hidden="true">${renderScreenshotAudioWave(b.waveform)}</span>
+        ${showName ? `<span class="chat-attachment-name">${escapeAttr(name)}</span>` : ""}
+        ${statusHTML}
+      </span>
+    `;
+  }
+
+  function renderScreenshotAttachment(b) {
+    const kind = normalizeScreenshotAttachmentKind(b.kind);
+    const name = typeof b.name === "string" && b.name.trim() ? b.name.trim() : "attachment";
+    const presentation = typeof b.presentation === "string" ? b.presentation : "attachment";
+    const status = typeof b.status === "string" ? b.status : "";
+    const expiredClass = status === "expired" ? " chat-attachment-expired" : "";
+    const statusHTML = renderScreenshotAttachmentStatus(status);
+
+    if (kind === "audio") {
+      const transcript = b.transcription?.status === "ready" && typeof b.transcription.text === "string"
+        ? b.transcription.text.trim()
+        : "";
+      const audioCard = renderScreenshotAudioCard(b, {
+        name,
+        statusHTML,
+        expiredClass,
+        showName: presentation !== "voice-input",
+      });
+      if (transcript) {
+        return `
+          <span class="chat-voice-card${expiredClass}" title="${escapeAttr(name)}">
+            <span class="chat-voice-transcript">${escapeAttr(transcript)}</span>
+            ${audioCard}
+          </span>
+        `;
+      }
+      return audioCard;
+    }
+
+    return `
+      <span class="chat-attachment${expiredClass}" title="${escapeAttr(name)}">
+        <span class="chat-attachment-icon">${renderScreenshotAttachmentIcon(kind)}</span>
+        <span class="chat-attachment-name">${escapeAttr(name)}</span>
+        ${statusHTML}
+      </span>
+    `;
+  }
+
   function renderBlock(b) {
     if (b.type === "html") return b.content;
-    if (b.type === "markdown") return md.render(b.content);
-    if (b.type === "image") return `<img src="${b.content}" class="chat-image" />`;
+    if (b.type === "markdown") return md.render(b.content, { sourceFilePath: payload.filePath || null });
+    if (b.type === "image") return `<img src="${escapeAttr(b.content)}" class="chat-image" />`;
+    if (b.type === "attachment") return renderScreenshotAttachment(b);
     return "";
   }
 
   let bodyHTML = "";
   if (payload.mode === "article" && payload.markdown) {
-    bodyHTML = `<article>${md.render(payload.markdown)}</article>`;
+    const articleHTML = payload.articleType === "code"
+      ? renderScreenshotCodeArticle(payload.markdown, payload.language)
+      : renderScreenshotMarkdownArticle(md, payload.markdown, { sourceFilePath: payload.filePath || null });
+    bodyHTML = `<article>${articleHTML}</article>`;
   } else if (payload.messages) {
     const parts = [];
     for (const msg of payload.messages) {
       const blockHTMLs = msg.blocks.map(renderBlock).join("");
 
       if (payload.mode === "conversation") {
+        const showHeader = msg.showHeader !== false;
         const avatarImg = msg.avatarDataUrl
           ? `<img class="chat-avatar" src="${msg.avatarDataUrl}" />`
           : `<div class="chat-avatar chat-avatar-fallback"></div>`;
+        const headerHTML = showHeader
+          ? `<div class="chat-header">${avatarImg}<span class="chat-name">${msg.name.replace(/</g, "&lt;")}</span></div>`
+          : "";
         parts.push(`
-          <div class="chat-message">
-            <div class="chat-header">
-              ${avatarImg}
-              <span class="chat-name">${msg.name.replace(/</g, "&lt;")}</span>
-            </div>
+          <div class="chat-message${showHeader ? "" : " chat-message-cont"}">
+            ${headerHTML}
             <div class="chat-body">${blockHTMLs}</div>
           </div>
         `);
@@ -2664,6 +3635,7 @@ function buildScreenshotHTML(payload) {
 
   const layoutCSS = `
     .chat-message { margin-bottom: 1.8em; }
+    .chat-message-cont { margin-top: -1.1em; }
     .chat-header { display: flex; align-items: center; gap: 0.5em; margin-bottom: 0.5em; }
     .chat-avatar { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
     .chat-avatar-fallback { background: #ddd; }
@@ -2671,6 +3643,141 @@ function buildScreenshotHTML(payload) {
     .chat-body { padding-left: 0; }
     .chat-body p:last-child { margin-bottom: 0; }
     .chat-image { width: ${themeName.endsWith("-desktop") ? "66.666%" : "100%"}; max-width: 100%; height: auto; border-radius: 6px; margin: 0.8em 0; display: block; }
+    .chat-attachment,
+    .chat-audio-card {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.38em;
+      max-width: 100%;
+      min-height: 2em;
+      margin: 0.25em 0.38em 0.45em 0;
+      padding: 0.3em 0.55em;
+      color: currentColor;
+      background: color-mix(in srgb, currentColor 7%, transparent);
+      border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+      border-radius: 6px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+      font-size: 0.78em;
+      line-height: 1;
+      vertical-align: middle;
+    }
+    .chat-attachment-expired {
+      opacity: 0.68;
+      border-style: dashed;
+      box-shadow: none;
+    }
+    .chat-attachment-icon,
+    .chat-audio-play {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      width: 1.2em;
+      height: 1.2em;
+    }
+    .chat-attachment-icon svg,
+    .chat-audio-play svg {
+      width: 1em;
+      height: 1em;
+    }
+    .chat-attachment-name {
+      min-width: 0;
+      max-width: 18em;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .chat-attachment-status {
+      flex: 0 0 auto;
+      opacity: 0.72;
+      font-size: 0.9em;
+    }
+    .chat-audio-card {
+      gap: 0.32em;
+      padding-right: 0.6em;
+      border: none;
+    }
+    .chat-audio-play {
+      background: color-mix(in srgb, currentColor 10%, transparent);
+      border-radius: 6px;
+    }
+    .chat-audio-wave {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      width: 4.2em;
+      height: 1.18em;
+      overflow: hidden;
+    }
+    .chat-audio-wave span {
+      display: block;
+      width: 2px;
+      min-height: 4px;
+      border-radius: 999px;
+      background: currentColor;
+      opacity: 0.58;
+    }
+    .chat-voice-card {
+      display: inline-flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.42em;
+      max-width: min(18em, 100%);
+      margin: 0.25em 0.38em 0.45em 0;
+      padding: 0.72em 0.72em 0.52em;
+      color: currentColor;
+      background: color-mix(in srgb, currentColor 7%, transparent);
+      border-radius: 8px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+      vertical-align: middle;
+    }
+    .chat-voice-card .chat-audio-card {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      box-shadow: none;
+    }
+    .chat-voice-transcript {
+      padding: 0 0.08em;
+      color: currentColor;
+      font-size: 1em;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .screenshot-cover {
+      display: block;
+      overflow: visible;
+      margin: 0 0 1.35em;
+      border-radius: 0;
+      background: transparent;
+    }
+    .screenshot-cover.screenshot-cover-bleed-x {
+      width: 100vw;
+      max-width: none;
+      margin-left: calc((100% - 100vw) / 2);
+      margin-right: calc((100% - 100vw) / 2);
+    }
+    .screenshot-cover.screenshot-cover-top {
+      margin-top: calc(0px - var(--screenshot-cover-bleed-top));
+    }
+    .screenshot-cover-frame {
+      width: 100%;
+      height: var(--screenshot-cover-height, 320px);
+      overflow: hidden;
+      margin: 0;
+      background: transparent;
+    }
+    .screenshot-cover-frame img {
+      width: 100%;
+      max-width: none;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      margin: 0;
+      border-radius: 0;
+    }
     .watermark {
       display: flex; align-items: center; justify-content: center;
       gap: 0.5em; padding: 1.5em 0 1em; opacity: 0.5;
@@ -2694,10 +3801,19 @@ function buildScreenshotHTML(payload) {
   ${bodyHTML}
   <footer class="watermark">
     <img class="watermark-logo" src="${logoUrl}" />
-    <span class="watermark-text">OpenHanako</span>
+    <span class="watermark-text">HanaAgent</span>
   </footer>
 </body>
 </html>`;
+}
+
+function sanitizeScreenshotFontFamily(value) {
+  const fallback = `"Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", "Lora", "Georgia", serif`;
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  if (/[;{}()<>\n\r]/.test(trimmed)) return fallback;
+  return trimmed;
 }
 
 async function screenshotCapture(htmlContent, width) {
@@ -2716,6 +3832,15 @@ async function screenshotCapture(htmlContent, width) {
     await offscreen.webContents.executeJavaScript(
       `document.fonts.ready.then(() => true)`
     );
+    await offscreen.webContents.executeJavaScript(`
+      Promise.all(Array.from(document.images).map((img) => {
+        if (img.complete) return true;
+        return new Promise((resolve) => {
+          img.addEventListener('load', resolve, { once: true });
+          img.addEventListener('error', resolve, { once: true });
+        });
+      })).then(() => true)
+    `);
     await new Promise(r => setTimeout(r, 300));
 
     const totalHeight = await offscreen.webContents.executeJavaScript(`
@@ -2779,19 +3904,67 @@ wrapIpcHandler("check-update", () => {
 });
 wrapIpcHandler("get-auto-launch-status", () => getAutoLaunchStatus({ app }));
 wrapIpcHandler("set-auto-launch-enabled", (_event, enabled) => setAutoLaunchEnabled({ app, enabled: enabled === true }));
+wrapIpcHandler("get-keep-awake-status", () => keepAwakeManager.getStatus());
+wrapIpcHandler("set-keep-awake-enabled", (_event, enabled) => keepAwakeManager.setEnabled(enabled === true));
+wrapIpcHandler("quick-chat-reload-shortcut", () => reloadQuickChatShortcut());
+wrapIpcHandler("quick-chat-shortcut-status", () => ({
+  shortcut: registeredQuickChatShortcut || readQuickChatPreferences().shortcut,
+  registered: !!registeredQuickChatShortcut && globalShortcut.isRegistered(registeredQuickChatShortcut),
+}));
+wrapIpcBestEffortHandler("quick-chat-show", () => showQuickChatWindow());
+wrapIpcBestEffortHandler("quick-chat-hide", () => hideQuickChatWindow());
+wrapIpcBestEffortHandler("quick-chat-resize", (_event, mode) => applyQuickChatMode(mode));
+wrapIpcBestEffortHandler("quick-chat-open-session", (_event, sessionPath) => {
+  if (typeof sessionPath !== "string" || !sessionPath.trim()) return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.send("quick-chat-open-session", { sessionPath });
+  }
+  hideQuickChatWindow();
+});
 
 wrapIpcBestEffortHandler("open-settings", (_event, tab, theme) => createSettingsWindow(tab, theme));
 
 // 浏览器查看器窗口
-wrapIpcBestEffortHandler("open-browser-viewer", (_event, theme) => {
+wrapIpcBestEffortHandler("open-browser-viewer", async (_event, theme, url) => {
   if (theme) _browserViewerTheme = theme;
   createBrowserViewerWindow();
+
+  if (url && isAllowedBrowserUrl(url)) {
+    await _openUrlInNewBrowserTab(null, url);
+    return;
+  }
+
+  if (!_browserWebView) {
+    const workspace = _ensureBrowserWorkspace(null);
+    const tab = _ensureBrowserTabForSession(null);
+    workspace.activeTabId = tab.tabId;
+    _switchActiveBrowserTab(null, tab.tabId);
+  } else {
+    _notifyViewerUrl(_browserWebView.webContents.getURL());
+  }
 });
 wrapIpcBestEffortHandler("browser-go-back", () => { if (_browserWebView) _browserWebView.webContents.goBack(); });
 wrapIpcBestEffortHandler("browser-go-forward", () => { if (_browserWebView) _browserWebView.webContents.goForward(); });
 wrapIpcBestEffortHandler("browser-reload", () => { if (_browserWebView) _browserWebView.webContents.reload(); });
 wrapIpcBestEffortHandler("browser-toggle-devtools", () => {
   if (_browserWebView) _toggleBrowserDevTools(_browserWebView.webContents);
+});
+wrapIpcBestEffortHandler("browser-new-tab", async () => {
+  await _openUrlInNewBrowserTab(_currentBrowserSession, null);
+});
+wrapIpcBestEffortHandler("browser-switch-tab", (_event, tabId) => {
+  if (typeof tabId !== "string" || !tabId) return;
+  _switchActiveBrowserTab(_currentBrowserSession, tabId);
+});
+wrapIpcBestEffortHandler("browser-close-tab", (_event, tabId) => {
+  if (typeof tabId !== "string" || !tabId) return;
+  return handleBrowserCommand("closeTab", {
+    sessionPath: _currentBrowserSession,
+    tabId,
+  });
 });
 wrapIpcBestEffortHandler("close-browser-viewer", () => {
   if (browserViewerWindow && !browserViewerWindow.isDestroyed()) browserViewerWindow.close();
@@ -2803,18 +3976,7 @@ wrapIpcBestEffortHandler("browser-emergency-stop", () => {
   }
   // 兼容无 sessionPath 的旧浏览器实例：没有 server 状态可同步，只能本地清理。
   if (_browserWebView) {
-    if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
-      try { browserViewerWindow.contentView.removeChildView(_browserWebView); } catch {}
-    }
-    _browserWebView.webContents.close();
-    if (_currentBrowserSession) {
-      _browserViews.delete(_currentBrowserSession);
-    }
-    _browserWebView = null;
-    _currentBrowserSession = null;
-  }
-  if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
-    browserViewerWindow.webContents.send("browser-update", { running: false });
+    _detachActiveBrowserView({ destroy: true, hideIfVisible: true, reason: "emergency-stop" });
   }
 });
 
@@ -2877,13 +4039,21 @@ wrapIpcBestEffortHandler("viewer-close", (event) => {
 
 wrapIpcOn("window-theme-changed", (event, theme) => {
   const win = BrowserWindow.fromWebContents(event.sender);
+  if (quickChatWindow && win && win.id === quickChatWindow.id) {
+    applyTransparentWindowBackground(win);
+    return;
+  }
   applyWindowThemeColors(win, theme);
 });
 
-// 设置窗口 → 主窗口的消息转发
+// 设置窗口 / 主窗口之间的设置事件转发
 wrapIpcOn("settings-changed", (_event, type, data) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
+  const sender = _event?.sender || null;
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents !== sender) {
     mainWindow.webContents.send("settings-changed", type, data);
+  }
+  if (settingsWindow && !settingsWindow.isDestroyed() && settingsWindow.webContents !== sender) {
+    settingsWindow.webContents.send("settings-changed", type, data);
   }
   if (type === "theme-changed" && data?.theme) {
     const name = data.theme;
@@ -2897,12 +4067,25 @@ wrapIpcOn("settings-changed", (_event, type, data) => {
       console.error("[desktop] apply network proxy failed:", redactMainLogText(err.message));
     });
   }
+  if (type === "keep-awake-changed") {
+    try {
+      keepAwakeManager.setEnabled(data?.keep_awake === true);
+    } catch (err) {
+      console.error("[desktop] apply keep awake failed:", redactMainLogText(err.message));
+    }
+  }
+  if (type === "quick-chat-shortcut-changed") {
+    const result = reloadQuickChatShortcut();
+    if (!result.ok) {
+      console.error("[desktop] Quick Chat 快捷键注册失败:", redactMainLogText(result.error || result.shortcut || "unknown"));
+    }
+  }
   if (type === "locale-changed") {
     resetMainI18n();
     // 重建托盘菜单，使标签跟随新 locale
     if (tray && !tray.isDestroyed()) {
       const buildMenu = () => Menu.buildFromTemplate([
-        { label: mt("tray.show", null, "Show Hanako"), click: () => showPrimaryWindow() },
+        { label: mt("tray.show", null, "Show HanaAgent"), click: () => showPrimaryWindow() },
         { label: mt("tray.settings", null, "Settings"), click: () => createSettingsWindow() },
         { type: "separator" },
         { label: mt("tray.quit", null, "Quit"), click: () => { isExitingServer = true; isQuitting = true; app.quit(); } },
@@ -3207,6 +4390,20 @@ wrapIpcBestEffortHandler("write-file-binary", (_event, filePath, base64Data) => 
   } catch { return false; }
 });
 
+wrapIpcBestEffortHandler("copy-file", (_event, sourcePath, destinationPath) => {
+  if (!sourcePath || !destinationPath) return false;
+  if (!path.isAbsolute(sourcePath) || !path.isAbsolute(destinationPath)) return false;
+  try {
+    const stat = fs.lstatSync(sourcePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    fs.copyFileSync(sourcePath, destinationPath);
+    return true;
+  } catch {
+    return false;
+  }
+});
+
 wrapIpcHandler("screenshot-render", (_event, payload) => {
   return withScreenshotLock(async () => {
     try {
@@ -3247,7 +4444,7 @@ wrapIpcHandler("screenshot-render", (_event, payload) => {
 // 文件监听（artifact 编辑 — 外部变更刷新用）
 const _watchedRendererIds = new Set();
 const _fileWatchRegistry = createFileWatchRegistry({
-  watch: (filePath, options, onChange) => fs.watch(filePath, options, onChange),
+  watch: createStableFileWatcher,
   notifySubscriber: (subscriberId, filePath) => {
     const wc = webContents.fromId(subscriberId);
     if (!wc || wc.isDestroyed()) {
@@ -3369,14 +4566,29 @@ wrapIpcBestEffortHandler("reload-main-window", () => {
   }
 });
 
-// 系统通知（由 agent 的 notify 工具触发）
-wrapIpcBestEffortHandler("show-notification", (_event, title, body) => {
-  if (!Notification.isSupported()) return;
-  const notif = new Notification({
+// 系统通知（由 agent 的 notify 工具或定时任务触发）
+// agentId 标识触发的助手；据此读取该 agent 头像作为通知 icon，让多 agent 并发通知可分辨身份。
+// agentId 缺失或头像不存在时退回无 icon，禁止用当前焦点 agent 兜底（会张冠李戴）。
+// Windows 自定义 icon 依赖 AppUserModelID 已注册（见上方 app.setAppUserModelId），已满足；三平台同一套逻辑。
+wrapIpcBestEffortHandler("show-notification", (_event, title, body, agentId, rawOptions) => {
+  const notificationOptions = normalizeDesktopNotificationOptions(rawOptions);
+  if (shouldSuppressDesktopNotification(notificationOptions, { getFocusedWindow: () => BrowserWindow.getFocusedWindow() })) {
+    return { shown: false, reason: "hana_focused" };
+  }
+  if (!Notification.isSupported()) return { shown: false, reason: "unsupported" };
+  /** @type {Electron.NotificationConstructorOptions} */
+  const options = {
     title: title || "Hana",
     body: body || "",
     silent: false,
-  });
+  };
+  const avatarPath = resolveAgentAvatarPath(hanakoHome, agentId);
+  if (avatarPath) {
+    const icon = nativeImage.createFromPath(avatarPath);
+    // createFromPath 对不支持的格式/损坏文件返回空图；空图会顶掉默认 icon，故只在有效时设置。
+    if (!icon.isEmpty()) options.icon = icon;
+  }
+  const notif = new Notification(options);
   notif.on("click", () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -3385,6 +4597,7 @@ wrapIpcBestEffortHandler("show-notification", (_event, title, body) => {
     }
   });
   notif.show();
+  return { shown: true };
 });
 
 // Debug: 打开 Onboarding 窗口（DevTools 用）
@@ -3412,6 +4625,7 @@ wrapIpcHandler("onboarding-complete", async () => {
     serverToken,
     createMainWindow,
   });
+  registerQuickChatShortcutBestEffort();
 });
 
 // ── 窗口控制 IPC（Windows/Linux 自绘标题栏用）──
@@ -3431,7 +4645,12 @@ wrapIpcHandler("window-is-maximized", (event) => {
 });
 
 // 前端初始化完成后调用，关闭 splash / onboarding，显示主窗口
-wrapIpcBestEffortHandler("app-ready", () => {
+wrapIpcBestEffortHandler("app-ready", (event) => {
+  writeDesktopLaunchDiagnostic("app-ready", {
+    label: "main",
+    senderUrl: event?.sender?.getURL?.() || "",
+    mainWindowVisible: mainWindow && !mainWindow.isDestroyed() ? mainWindow.isVisible() : false,
+  });
   if (process.platform === "win32") {
     markGpuStartupReady({
       hanakoHome,
@@ -3478,6 +4697,7 @@ app.whenReady().then(async () => {
     const splashShownAt = Date.now();
     await resolveLoginShellPath();
     await applyDesktopNetworkProxy(readNetworkProxyPreference(), { reason: "startup" });
+    keepAwakeManager.setEnabled(readKeepAwakePreference());
 
     // 2. 后台启动 server（PATH 已就绪）
     if (process.platform === "win32") {
@@ -3488,7 +4708,7 @@ app.whenReady().then(async () => {
         startupId: desktopStartupId,
       });
     }
-    console.log("[desktop] 启动 Hanako Server...");
+    console.log("[desktop] 启动 HanaAgent Server...");
     await startServer();
     if (process.platform === "win32") {
       markGpuStartupPhase({
@@ -3517,7 +4737,16 @@ app.whenReady().then(async () => {
     const migratedSetupComplete = await migrateSetupCompleteViaServerIfNeeded();
     if (isSetupComplete() || migratedSetupComplete) {
       // 已完成配置：直接创建主窗口
+      if (process.platform === "win32") {
+        markGpuStartupPhase({
+          hanakoHome,
+          platform: process.platform,
+          phase: "main-window-starting",
+          startupId: desktopStartupId,
+        });
+      }
       createMainWindow();
+      registerQuickChatShortcutBestEffort();
       if (process.platform === "win32") {
         markGpuStartupPhase({
           hanakoHome,
@@ -3529,6 +4758,14 @@ app.whenReady().then(async () => {
     } else if (hasExistingConfig()) {
       // 老用户：已有 api_key，跳过填写直接看教程
       console.log("[desktop] 检测到已有配置，跳到教程页");
+      if (process.platform === "win32") {
+        markGpuStartupPhase({
+          hanakoHome,
+          platform: process.platform,
+          phase: "onboarding-window-starting",
+          startupId: desktopStartupId,
+        });
+      }
       createOnboardingWindow({ skipToTutorial: "1" });
       if (process.platform === "win32") {
         markGpuStartupPhase({
@@ -3541,6 +4778,14 @@ app.whenReady().then(async () => {
     } else {
       // 全新用户：完整 onboarding 向导
       console.log("[desktop] 首次启动，显示 Onboarding 向导");
+      if (process.platform === "win32") {
+        markGpuStartupPhase({
+          hanakoHome,
+          platform: process.platform,
+          phase: "onboarding-window-starting",
+          startupId: desktopStartupId,
+        });
+      }
       createOnboardingWindow();
       if (process.platform === "win32") {
         markGpuStartupPhase({
@@ -3564,6 +4809,11 @@ app.whenReady().then(async () => {
     checkForUpdates().catch(() => {});
   } catch (err) {
     console.error("[desktop] 启动失败:", err.message);
+    writeDesktopLaunchDiagnostic("desktop-launch-failed", {
+      message: err?.message || String(err),
+      code: err?.code,
+      stack: err?.stack,
+    });
     if (process.platform === "win32") {
       markGpuStartupFailed({
         hanakoHome,
@@ -3576,7 +4826,7 @@ app.whenReady().then(async () => {
     const crashInfo = writeCrashLog(err.message);
     const detail = buildLaunchFailureDialogDetail(err, crashInfo);
     dialog.showErrorBox(
-      mt("dialog.launchFailedTitle", null, "Hanako Launch Failed"),
+      mt("dialog.launchFailedTitle", null, "HanaAgent Launch Failed"),
       mt("dialog.launchFailedBody", {
         version: app?.getVersion?.() || "unknown",
         detail,
@@ -3606,20 +4856,9 @@ app.on("activate", () => {
   }
 });
 
-// ── 休眠/唤醒监听（防止长时间闲置后白屏） ──
-app.on("before-quit", () => { /* powerMonitor 在 before-quit 中无需额外处理 */ });
-powerMonitor.on("resume", () => {
-  console.log("[desktop] 系统从休眠中恢复，通知前端重连 WebSocket");
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("system-resumed");
-  }
-  if (settingsWindow && !settingsWindow.isDestroyed()) {
-    settingsWindow.webContents.send("system-resumed");
-  }
-});
-
 // ── 优雅关闭 ──
 app.on("will-quit", () => {
+  keepAwakeManager.dispose();
   globalShortcut.unregisterAll();
   // 销毁托盘图标
   if (tray && !tray.isDestroyed()) {
@@ -3659,8 +4898,16 @@ async function shutdownServer() {
 
     if (serverProcess === proc) serverProcess = null;
   } else if (reusedServerPid) {
-    console.log("[desktop] shutdownServer: 正在关闭 reused server...");
     const pid = reusedServerPid;
+    if (!reusedServerOwned) {
+      console.log("[desktop] shutdownServer: detached from external server");
+      reusedServerPid = null;
+      reusedServerOwned = false;
+      removeServerInfo = false;
+      return;
+    }
+
+    console.log("[desktop] shutdownServer: 正在关闭 reused server...");
     try {
       await fetch(`http://127.0.0.1:${serverPort}/api/shutdown`, {
         method: "POST",
@@ -3680,7 +4927,10 @@ async function shutdownServer() {
         removeServerInfo = false;
       }
     }
-    if (reusedServerPid === pid) reusedServerPid = null;
+    if (reusedServerPid === pid) {
+      reusedServerPid = null;
+      reusedServerOwned = false;
+    }
   }
   // 清理 server-info.json，防止更新后新版 Electron 误连旧 server
   if (removeServerInfo) {
@@ -3704,15 +4954,18 @@ app.on("before-quit", async (event) => {
   }
 
   // 清理浏览器实例
-  for (const [sp, view] of _browserViews) {
-    try { view.webContents.close(); } catch {}
+  for (const workspace of _browserViews.values()) {
+    for (const tab of workspace.tabs.values()) {
+      try { tab.view.webContents.close(); } catch {}
+    }
   }
   _browserViews.clear();
   _browserWebView = null;
   _currentBrowserSession = null;
+  _currentBrowserTabId = null;
 
   // server 清理
-  if ((serverProcess && !hasChildExitObserved(serverProcess)) || reusedServerPid) {
+  if ((serverProcess && !hasChildExitObserved(serverProcess)) || (reusedServerPid && reusedServerOwned)) {
     event.preventDefault();
     await shutdownServer();
     app.quit();
@@ -3720,19 +4973,11 @@ app.on("before-quit", async (event) => {
 });
 
 // ── 全局错误兜底（结构化日志）──
-let _handlingUncaught = false;
 process.on('uncaughtException', (err) => {
-  // 防止 console.error 触发 EIO 导致无限递归写爆磁盘
-  if (_handlingUncaught) return;
-  _handlingUncaught = true;
-  try {
-    if (err.code === 'EPIPE' || err.code === 'ERR_IPC_CHANNEL_CLOSED') return;
-    const traceId = Math.random().toString(16).slice(2, 10);
-    try { console.error(`[ErrorBus][${err.code || 'UNKNOWN'}][${traceId}] uncaughtException: ${redactMainLogText(err.message)}`); } catch {}
-    try { console.error(`[ErrorBus][${traceId}] ${redactMainLogText(err.stack || err.message)}`); } catch {}
-  } finally {
-    _handlingUncaught = false;
-  }
+  if (err.code === 'EPIPE' || err.code === 'ERR_IPC_CHANNEL_CLOSED') return;
+  const traceId = Math.random().toString(16).slice(2, 10);
+  console.error(`[ErrorBus][${err.code || 'UNKNOWN'}][${traceId}] uncaughtException: ${redactMainLogText(err.message)}`);
+  console.error(`[ErrorBus][${traceId}] ${redactMainLogText(err.stack || err.message)}`);
 });
 
 process.on('unhandledRejection', (reason) => {

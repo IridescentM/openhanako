@@ -4,10 +4,40 @@
 
 import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 
-const getAutoLaunchStatus = vi.fn();
-const setAutoLaunchEnabled = vi.fn();
+vi.mock('../../../hooks/use-auto-update-state', () => ({
+  useAutoUpdateState: () => ({ status: 'idle' }),
+}));
+
+vi.mock('../../widgets/Toggle', () => ({
+  Toggle: ({
+    on,
+    onChange,
+    label,
+    ariaLabel,
+  }: {
+    on: boolean | undefined;
+    onChange: (next: boolean) => void;
+    label?: string;
+    ariaLabel?: string;
+  }) => (
+    <button
+      type="button"
+      aria-label={ariaLabel || label}
+      aria-busy={on === undefined ? 'true' : undefined}
+      aria-checked={on === undefined ? 'mixed' : on ? 'true' : 'false'}
+      data-testid={`${ariaLabel || label}-${on === undefined ? 'loading' : on ? 'on' : 'off'}`}
+      disabled={on === undefined}
+      onClick={() => {
+        if (on !== undefined) onChange(!on);
+      }}
+    >
+      toggle
+    </button>
+  ),
+}));
+
 const autoSaveConfig = vi.fn();
 const loadSettingsConfig = vi.fn();
 
@@ -20,48 +50,18 @@ vi.mock('../../actions', () => ({
   loadSettingsConfig: (...args: unknown[]) => loadSettingsConfig(...args),
 }));
 
-vi.mock('../../../hooks/use-auto-update-state', () => ({
-  useAutoUpdateState: () => ({ status: 'idle' }),
-}));
-
-vi.mock('../../widgets/Toggle', () => ({
-  Toggle: ({
-    on,
-    onChange,
-    label,
-    disabled,
-  }: {
-    on: boolean;
-    onChange: (next: boolean) => void;
-    label?: string;
-    disabled?: boolean;
-  }) => (
-    <button
-      type="button"
-      aria-label={label}
-      data-testid={`${label}-${on ? 'on' : 'off'}`}
-      disabled={disabled}
-      onClick={() => onChange(!on)}
-    >
-      toggle
-    </button>
-  ),
-}));
-
 import { AboutTab } from '../AboutTab';
 import { useSettingsStore } from '../../store';
 
 afterEach(() => {
   cleanup();
-  getAutoLaunchStatus.mockReset();
-  setAutoLaunchEnabled.mockReset();
   autoSaveConfig.mockReset();
   loadSettingsConfig.mockReset();
   useSettingsStore.setState({ settingsConfig: null });
   vi.unstubAllGlobals();
 });
 
-function installHana(overrides: Record<string, unknown> = {}) {
+function installHana() {
   vi.stubGlobal('window', Object.assign(window, {
     hana: {
       getAppVersion: vi.fn().mockResolvedValue('0.160.2'),
@@ -69,70 +69,38 @@ function installHana(overrides: Record<string, unknown> = {}) {
       autoUpdateInstall: vi.fn(),
       autoUpdateSetChannel: vi.fn(),
       openExternal: vi.fn(),
-      getAutoLaunchStatus,
-      setAutoLaunchEnabled,
-      ...overrides,
     },
   }));
 }
 
-describe('AboutTab auto launch setting', () => {
-  it('renders launch-at-login above automatic update settings when supported', async () => {
+describe('AboutTab', () => {
+  it('keeps startup and background controls out of the about page', () => {
     installHana();
     useSettingsStore.setState({ settingsConfig: { auto_check_updates: true, update_channel: 'stable' } });
-    getAutoLaunchStatus.mockResolvedValue({
-      supported: true,
-      openAtLogin: false,
-      openedAtLogin: false,
-      status: null,
-    });
 
     render(<AboutTab />);
 
-    const launchRow = await screen.findByText('settings.about.launchAtLogin');
-    const autoUpdateRow = screen.getByText('settings.about.autoCheckUpdates');
-
-    expect(launchRow.compareDocumentPosition(autoUpdateRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getByTestId('settings.about.launchAtLogin-off')).toBeTruthy();
+    expect(screen.getByText('settings.about.autoCheckUpdates')).toBeTruthy();
+    expect(screen.getByText('settings.about.betaUpdates')).toBeTruthy();
+    expect(screen.queryByText('settings.general.launchAtLogin')).toBeNull();
+    expect(screen.queryByText('settings.general.keepAwake')).toBeNull();
   });
 
-  it('updates the launch-at-login row from the main-process result', async () => {
+  it('keeps update switches in loading state until settings config is ready', () => {
     installHana();
-    useSettingsStore.setState({ settingsConfig: { auto_check_updates: true, update_channel: 'stable' } });
-    getAutoLaunchStatus.mockResolvedValue({
-      supported: true,
-      openAtLogin: false,
-      openedAtLogin: false,
-      status: null,
-    });
-    setAutoLaunchEnabled.mockResolvedValue({
-      supported: true,
-      openAtLogin: true,
-      openedAtLogin: false,
-      status: null,
-    });
+    useSettingsStore.setState({ settingsConfig: null });
 
     render(<AboutTab />);
 
-    fireEvent.click(await screen.findByTestId('settings.about.launchAtLogin-off'));
-
-    await waitFor(() => expect(setAutoLaunchEnabled).toHaveBeenCalledWith(true));
-    await screen.findByTestId('settings.about.launchAtLogin-on');
-  });
-
-  it('does not render launch-at-login on unsupported platforms', async () => {
-    installHana();
-    useSettingsStore.setState({ settingsConfig: { auto_check_updates: true, update_channel: 'stable' } });
-    getAutoLaunchStatus.mockResolvedValue({
-      supported: false,
-      openAtLogin: false,
-      openedAtLogin: false,
-      status: 'unsupported',
-    });
-
-    render(<AboutTab />);
-
-    await waitFor(() => expect(getAutoLaunchStatus).toHaveBeenCalled());
-    expect(screen.queryByText('settings.about.launchAtLogin')).toBeNull();
+    const switches = screen.getAllByRole('button').filter(
+      el => el.getAttribute('aria-checked') === 'mixed',
+    ) as HTMLButtonElement[];
+    expect(switches).toHaveLength(2);
+    for (const item of switches) {
+      expect(item.disabled).toBe(true);
+      fireEvent.click(item);
+    }
+    expect(autoSaveConfig).not.toHaveBeenCalled();
+    expect(loadSettingsConfig).not.toHaveBeenCalled();
   });
 });

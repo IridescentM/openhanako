@@ -5,9 +5,11 @@ import { hanaFetch } from '../api';
 import { loadSettingsConfig } from '../actions';
 import { Toggle } from '../widgets/Toggle';
 import { SelectWidget } from '@/ui';
+import { readConfigBoolean } from '../resource-state';
 import { SettingsSection } from '../components/SettingsSection';
 import { SettingsRow } from '../components/SettingsRow';
 import { ExpandableRow } from '../components/ExpandableRow';
+import { ArchivedSessionsModal } from '../../components/ArchivedSessionsModal';
 import styles from '../Settings.module.css';
 
 interface Checkpoint {
@@ -73,14 +75,18 @@ export function SecurityTab() {
   const showToast = useSettingsStore(s => s.showToast);
   // 默认开（!== false）：和后端 preferences-manager.getSandboxNetwork / engine.getSandboxNetwork 保持一致。
   // 见 core/preferences-manager.js:86 和 commit 51ecc435。
-  const sandboxEnabled = settingsConfig?.sandbox !== false;
+  const sandboxEnabled = readConfigBoolean(settingsConfig, cfg => cfg.sandbox, true);
   const isWindows = platformName === 'win32';
-  const sandboxNetworkEnabled = isWindows || settingsConfig?.sandbox_network !== false;
-  const sandboxNetworkDisabled = !sandboxEnabled || isWindows;
-  const fileBackup = settingsConfig?.file_backup || { enabled: false, retention_days: 1, max_file_size_kb: 1024 };
+  const sandboxNetworkEnabled = settingsConfig
+    ? isWindows || readConfigBoolean(settingsConfig, cfg => cfg.sandbox_network, true)
+    : undefined;
+  const sandboxNetworkDisabled = sandboxEnabled !== true || isWindows;
+  const fileBackupEnabled = readConfigBoolean(settingsConfig, cfg => cfg.file_backup?.enabled, false);
+  const fileBackup = settingsConfig?.file_backup || { enabled: fileBackupEnabled, retention_days: 1, max_file_size_kb: 1024 };
 
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
   const [loading, setLoading] = useState(false);
+  const [archivedOpen, setArchivedOpen] = useState(false);
   const [proxyDraft, setProxyDraft] = useState<NetworkProxyConfig>(
     () => normalizeNetworkProxyDraft(settingsConfig?.network_proxy),
   );
@@ -197,7 +203,7 @@ export function SecurityTab() {
             />
           }
         />
-        {!sandboxEnabled && (
+        {sandboxEnabled === false && (
           <SettingsSection.Warning>
             {t('settings.security.sandboxWarning')}
           </SettingsSection.Warning>
@@ -208,10 +214,10 @@ export function SecurityTab() {
         <SettingsRow
           label={t('settings.security.fileBackup')}
           hint={t('settings.security.fileBackupDesc')}
-          control={<Toggle on={fileBackup.enabled} onChange={handleBackupToggle} />}
+          control={<Toggle on={fileBackupEnabled} onChange={handleBackupToggle} />}
         />
 
-        {fileBackup.enabled && (
+        {fileBackupEnabled === true && (
           <>
             <SettingsRow
               label={t('settings.security.retention')}
@@ -263,6 +269,22 @@ export function SecurityTab() {
             </ExpandableRow>
           </>
         )}
+      </SettingsSection>
+
+      <SettingsSection title={t('settings.security.archivedChats')}>
+        <SettingsRow
+          label={t('settings.security.archivedChats')}
+          hint={t('settings.security.archivedChatsDesc')}
+          control={
+            <button
+              type="button"
+              className={styles['settings-btn-secondary']}
+              onClick={() => setArchivedOpen(true)}
+            >
+              {t('settings.security.viewArchivedChats')}
+            </button>
+          }
+        />
       </SettingsSection>
 
       <SettingsSection title={t('settings.security.networkProxy')}>
@@ -329,6 +351,11 @@ export function SecurityTab() {
           </button>
         </SettingsSection.Footer>
       </SettingsSection>
+      <ArchivedSessionsModal
+        open={archivedOpen}
+        onClose={() => setArchivedOpen(false)}
+        zIndex={1900}
+      />
     </div>
   );
 }

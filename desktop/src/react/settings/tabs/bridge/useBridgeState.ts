@@ -4,9 +4,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSettingsStore } from '../../store';
 import { hanaFetch } from '../../api';
-import { loadSettingsConfig } from '../../actions';
+import { loadSettingsConfig, updateSettingsSnapshot } from '../../actions';
 import { t } from '../../helpers';
-import type { KnownUser } from './BridgeWidgets';
+import type { BridgePermissionMode, KnownUser } from './BridgeWidgets';
 
 // ── Types ──
 
@@ -19,29 +19,72 @@ interface PlatformStatusBase {
 
 export interface TelegramStatus extends PlatformStatusBase { token?: string }
 export interface FeishuStatus extends PlatformStatusBase { appId?: string; appSecret?: string }
+export interface DingTalkStatus extends PlatformStatusBase { clientId?: string; clientSecret?: string; robotCode?: string; restBaseUrl?: string }
 export interface QQStatus extends PlatformStatusBase { appID?: string; appSecret?: string }
 export interface WechatStatus extends PlatformStatusBase { token?: string }
 
 export interface BridgeStatus {
+  agentId?: string | null;
   telegram: TelegramStatus;
   feishu: FeishuStatus;
+  dingtalk: DingTalkStatus;
   whatsapp: PlatformStatusBase;
   qq: QQStatus;
   wechat: WechatStatus;
+  permissionMode: BridgePermissionMode;
   readOnly: boolean;
   receiptEnabled: boolean;
-  knownUsers: { telegram?: KnownUser[]; feishu?: KnownUser[]; whatsapp?: KnownUser[]; qq?: KnownUser[]; wechat?: KnownUser[] };
-  owner: { telegram?: string; feishu?: string; whatsapp?: string; qq?: string; wechat?: string };
+  richStreamingEnabled: boolean;
+  knownUsers: { telegram?: KnownUser[]; feishu?: KnownUser[]; dingtalk?: KnownUser[]; whatsapp?: KnownUser[]; qq?: KnownUser[]; wechat?: KnownUser[] };
+  owner: { telegram?: string; feishu?: string; dingtalk?: string; whatsapp?: string; qq?: string; wechat?: string };
 }
 
-export type BridgePlatform = 'telegram' | 'feishu' | 'whatsapp' | 'qq' | 'wechat';
+export type BridgePlatform = 'telegram' | 'feishu' | 'dingtalk' | 'whatsapp' | 'qq' | 'wechat';
+
+function normalizeBridgeStatus(data: any): BridgeStatus | null {
+  if (!data || typeof data !== 'object') return null;
+  return {
+    agentId: data.agentId || null,
+    telegram: data.telegram || {},
+    feishu: data.feishu || {},
+    dingtalk: data.dingtalk || {},
+    whatsapp: data.whatsapp || {},
+    qq: data.qq || {},
+    wechat: data.wechat || {},
+    permissionMode: data.permissionMode || (data.readOnly === true ? 'read_only' : 'auto'),
+    readOnly: data.readOnly === true,
+    receiptEnabled: data.receiptEnabled !== false,
+    richStreamingEnabled: data.richStreamingEnabled !== false,
+    knownUsers: data.knownUsers || {},
+    owner: data.owner || {},
+  };
+}
+
+function bridgeCredentials(status: BridgeStatus | null) {
+  return {
+    tgToken: status?.telegram?.token || '',
+    fsAppId: status?.feishu?.appId || '',
+    fsAppSecret: status?.feishu?.appSecret || '',
+    dtClientId: status?.dingtalk?.clientId || '',
+    dtClientSecret: status?.dingtalk?.clientSecret || '',
+    dtRobotCode: status?.dingtalk?.robotCode || '',
+    dtRestBaseUrl: status?.dingtalk?.restBaseUrl || '',
+    qqAppId: status?.qq?.appID || '',
+    qqAppSecret: status?.qq?.appSecret || '',
+  };
+}
 
 export function useBridgeState() {
   // Atomic selectors: only re-render when these specific fields change
   const showToast = useSettingsStore(s => s.showToast);
   const currentAgentId = useSettingsStore(s => s.currentAgentId);
+  const settingsSnapshot = useSettingsStore(s => s.settingsSnapshot.data);
+  const snapshotBridgeStatus = settingsSnapshot?.agentId === currentAgentId
+    ? normalizeBridgeStatus(settingsSnapshot.bridgeStatus)
+    : null;
+  const snapshotCredentials = bridgeCredentials(snapshotBridgeStatus);
 
-  const [status, setStatus] = useState<BridgeStatus | null>(null);
+  const [status, setStatus] = useState<BridgeStatus | null>(() => snapshotBridgeStatus);
   const [testingPlatform, setTestingPlatform] = useState<BridgePlatform | null>(null);
   const [globalSettingsSaving, setGlobalSettingsSaving] = useState(false);
 
@@ -59,26 +102,59 @@ export function useBridgeState() {
   }, [currentAgentId]);
 
   // Public Ishiki — keyed to selectedAgentId
-  const [publicIshiki, setPublicIshiki] = useState('');
-  const [publicIshikiOriginal, setPublicIshikiOriginal] = useState('');
+  const initialPublicIshiki = settingsSnapshot?.agentId === currentAgentId ? settingsSnapshot.publicIshiki || '' : '';
+  const [publicIshiki, setPublicIshiki] = useState(initialPublicIshiki);
+  const [publicIshikiOriginal, setPublicIshikiOriginal] = useState(initialPublicIshiki);
 
   // Credential fields
-  const [tgToken, setTgToken] = useState('');
-  const [fsAppId, setFsAppId] = useState('');
-  const [fsAppSecret, setFsAppSecret] = useState('');
-  const [qqAppId, setQqAppId] = useState('');
-  const [qqAppSecret, setQqAppSecret] = useState('');
+  const [tgToken, setTgToken] = useState(snapshotCredentials.tgToken);
+  const [fsAppId, setFsAppId] = useState(snapshotCredentials.fsAppId);
+  const [fsAppSecret, setFsAppSecret] = useState(snapshotCredentials.fsAppSecret);
+  const [dtClientId, setDtClientId] = useState(snapshotCredentials.dtClientId);
+  const [dtClientSecret, setDtClientSecret] = useState(snapshotCredentials.dtClientSecret);
+  const [dtRobotCode, setDtRobotCode] = useState(snapshotCredentials.dtRobotCode);
+  const [dtRestBaseUrl, setDtRestBaseUrl] = useState(snapshotCredentials.dtRestBaseUrl);
+  const [qqAppId, setQqAppId] = useState(snapshotCredentials.qqAppId);
+  const [qqAppSecret, setQqAppSecret] = useState(snapshotCredentials.qqAppSecret);
+
+  const applyStatus = useCallback((nextStatus: BridgeStatus | null) => {
+    setStatus(nextStatus);
+    const nextCredentials = bridgeCredentials(nextStatus);
+    setTgToken(nextCredentials.tgToken);
+    setFsAppId(nextCredentials.fsAppId);
+    setFsAppSecret(nextCredentials.fsAppSecret);
+    setDtClientId(nextCredentials.dtClientId);
+    setDtClientSecret(nextCredentials.dtClientSecret);
+    setDtRobotCode(nextCredentials.dtRobotCode);
+    setDtRestBaseUrl(nextCredentials.dtRestBaseUrl);
+    setQqAppId(nextCredentials.qqAppId);
+    setQqAppSecret(nextCredentials.qqAppSecret);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    if (settingsSnapshot?.agentId !== selectedAgentId) return;
+    const nextStatus = normalizeBridgeStatus(settingsSnapshot.bridgeStatus);
+    if (!nextStatus) return;
+    applyStatus(nextStatus);
+  }, [applyStatus, selectedAgentId, settingsSnapshot]);
 
   // Fetch public ishiki for selected agent (abort stale requests on agent switch)
   useEffect(() => {
     if (!selectedAgentId) return;
+    if (settingsSnapshot?.agentId === selectedAgentId) {
+      const content = settingsSnapshot.publicIshiki || '';
+      setPublicIshiki(content);
+      setPublicIshikiOriginal(content);
+      return;
+    }
     const ac = new AbortController();
     hanaFetch(`/api/agents/${selectedAgentId}/public-ishiki`, { signal: ac.signal })
       .then(r => r.json())
       .then(data => { setPublicIshiki(data.content || ''); setPublicIshikiOriginal(data.content || ''); })
       .catch(err => { if (err?.name !== 'AbortError') console.warn('[bridge] fetch public-ishiki failed:', err); });
     return () => ac.abort();
-  }, [selectedAgentId]);
+  }, [selectedAgentId, settingsSnapshot]);
 
   const savePublicIshiki = async () => {
     const agentId = selectedAgentId;
@@ -89,6 +165,9 @@ export function useBridgeState() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: publicIshiki }),
       });
+      updateSettingsSnapshot(snapshot => (
+        snapshot.agentId === agentId ? { ...snapshot, publicIshiki } : snapshot
+      ));
       setPublicIshikiOriginal(publicIshiki);
       showToast(t('settings.saved'), 'success');
     } catch (err: unknown) {
@@ -103,25 +182,23 @@ export function useBridgeState() {
       const res = await hanaFetch(`/api/bridge/status${query}`, signal ? { signal } : undefined);
       const data = await res.json();
       if (signal?.aborted) return;
-      setStatus(data);
-      setTgToken(data.telegram?.token || '');
-      setFsAppId(data.feishu?.appId || '');
-      setFsAppSecret(data.feishu?.appSecret || '');
-      setQqAppId(data.qq?.appID || '');
-      setQqAppSecret(data.qq?.appSecret || '');
+      applyStatus(normalizeBridgeStatus(data));
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') return;
       console.error('[bridge] load status failed:', err);
     }
-  }, []); // stable: reads agentId from ref, all setters are stable
+  }, [applyStatus]); // stable: reads agentId from ref, all setters are stable
 
   // Auto-fetch when selectedAgentId changes (abort stale on switch)
   useEffect(() => {
     if (!selectedAgentId) return;
+    if (settingsSnapshot?.agentId !== selectedAgentId) {
+      applyStatus(null);
+    }
     const ac = new AbortController();
     loadStatus(ac.signal);
     return () => ac.abort();
-  }, [selectedAgentId, loadStatus]);
+  }, [applyStatus, selectedAgentId, loadStatus, settingsSnapshot?.agentId]);
 
   useEffect(() => {
     const handler = () => loadStatus();
@@ -149,8 +226,10 @@ export function useBridgeState() {
 
   const testPlatform = async (plat: BridgePlatform, credentials: Record<string, string>) => {
     setTestingPlatform(plat);
+    const agentId = selectedAgentId;
     try {
-      const res = await hanaFetch('/api/bridge/test', {
+      const agentQuery = agentId ? `?agentId=${encodeURIComponent(agentId)}` : '';
+      const res = await hanaFetch(`/api/bridge/test${agentQuery}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ platform: plat, credentials }),
@@ -184,7 +263,7 @@ export function useBridgeState() {
     }
   };
 
-  const saveGlobalSettings = async (partial: { readOnly?: boolean; receiptEnabled?: boolean }) => {
+  const saveGlobalSettings = async (partial: { permissionMode?: BridgePermissionMode; readOnly?: boolean; receiptEnabled?: boolean; richStreamingEnabled?: boolean }) => {
     setGlobalSettingsSaving(true);
     try {
       const res = await hanaFetch('/api/bridge/settings', {
@@ -194,11 +273,13 @@ export function useBridgeState() {
       });
       const saved = await res.json();
       if (saved.error) throw new Error(saved.error);
-      if (typeof saved.readOnly === 'boolean' && typeof saved.receiptEnabled === 'boolean') {
+      if (typeof saved.permissionMode === 'string' && typeof saved.readOnly === 'boolean' && typeof saved.receiptEnabled === 'boolean' && typeof saved.richStreamingEnabled === 'boolean') {
         setStatus(prev => prev ? {
           ...prev,
+          permissionMode: saved.permissionMode,
           readOnly: saved.readOnly,
           receiptEnabled: saved.receiptEnabled,
+          richStreamingEnabled: saved.richStreamingEnabled,
         } : prev);
       }
       showToast(t('settings.saved'), 'success');
@@ -219,6 +300,7 @@ export function useBridgeState() {
     publicIshiki, setPublicIshiki, savePublicIshiki,
     tgToken, setTgToken,
     fsAppId, setFsAppId, fsAppSecret, setFsAppSecret,
+    dtClientId, setDtClientId, dtClientSecret, setDtClientSecret, dtRobotCode, setDtRobotCode, dtRestBaseUrl, setDtRestBaseUrl,
     qqAppId, setQqAppId, qqAppSecret, setQqAppSecret,
     saveBridgeConfig, testPlatform, setOwner, saveGlobalSettings,
   };

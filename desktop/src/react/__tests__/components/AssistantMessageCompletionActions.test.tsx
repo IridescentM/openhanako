@@ -90,19 +90,76 @@ describe('AssistantMessage completion actions', () => {
         showAvatar={false}
         sessionPath={sessionPath}
         isLatestAssistantMessage
+        showTurnCompletionTime
         retrySourceMessage={userMessage}
       />,
     );
 
     expect(screen.getByText('05:43')).toBeInTheDocument();
-    expect(within(screen.getByTestId('assistant-completion-actions')).queryByTitle('复制文本')).not.toBeInTheDocument();
+    const footer = screen.getByTestId('assistant-completion-actions');
+    expect(footer.className).not.toContain('messageFooterActionsVisible');
+    expect(footer.className).toContain('messageFooterActionsTimePersistent');
+    expect(within(footer).getByTitle('复制文本')).toBeInTheDocument();
+    expect(within(footer).getByTitle('截图')).toBeInTheDocument();
+    expect(within(footer).getByTitle('全选消息')).toBeInTheDocument();
+    expect(within(footer).getByTitle('选择消息')).toBeInTheDocument();
+
+    const ordered = Array.from(footer.children).map(child => (
+      child.textContent?.trim() || child.getAttribute('title') || ''
+    ));
+
+    expect(ordered).toEqual([
+      '05:43',
+      '重新生成',
+      '复制文本',
+      '截图',
+      '全选消息',
+      '选择消息',
+    ]);
 
     fireEvent.click(screen.getByTitle('重新生成'));
 
     expect(replayMock).toHaveBeenCalledWith(sessionPath, userMessage);
   });
 
-  it('hides the completion footer while the assistant reply is still streaming', () => {
+  it('does not render a footer unless the caller marks the assistant message as turn completion', () => {
+    render(
+      <AssistantMessage
+        message={assistantMessage}
+        showAvatar={false}
+        sessionPath={sessionPath}
+        isLatestAssistantMessage={false}
+        retrySourceMessage={userMessage}
+      />,
+    );
+
+    expect(screen.queryByText('05:43')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('assistant-completion-actions')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('重新生成')).not.toBeInTheDocument();
+  });
+
+  it('keeps time available for older turn-ending assistant replies without retry controls', () => {
+    render(
+      <AssistantMessage
+        message={assistantMessage}
+        showAvatar={false}
+        sessionPath={sessionPath}
+        isLatestAssistantMessage={false}
+        showTurnCompletionTime
+        retrySourceMessage={userMessage}
+      />,
+    );
+
+    expect(screen.getByText('05:43')).toBeInTheDocument();
+    expect(screen.getByTestId('assistant-completion-actions').className).not.toContain('messageFooterActionsTimePersistent');
+    expect(screen.queryByTitle('重新生成')).not.toBeInTheDocument();
+    expect(screen.getByTitle('复制文本')).toBeInTheDocument();
+    expect(screen.getByTitle('截图')).toBeInTheDocument();
+    expect(screen.getByTitle('全选消息')).toBeInTheDocument();
+    expect(screen.getByTitle('选择消息')).toBeInTheDocument();
+  });
+
+  it('hides the assistant footer while the assistant reply is still streaming', () => {
     useStore.setState({ streamingSessions: [sessionPath] } as never);
 
     render(
@@ -111,11 +168,13 @@ describe('AssistantMessage completion actions', () => {
         showAvatar={false}
         sessionPath={sessionPath}
         isLatestAssistantMessage
+        showTurnCompletionTime
         retrySourceMessage={userMessage}
       />,
     );
 
     expect(screen.queryByText('05:43')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('assistant-completion-actions')).not.toBeInTheDocument();
     expect(screen.queryByTitle('重新生成')).not.toBeInTheDocument();
   });
 });

@@ -1,5 +1,5 @@
 import type { FileRef } from '../types/file-ref';
-import { buildConnectionUrl, type ServerConnection } from './server-connection';
+import { buildConnectionUrl, isLocalOwnerConnection, type ServerConnection } from './server-connection';
 
 export type FileRefUrlMode = 'local-file' | 'resource-content' | 'inline-data';
 
@@ -21,7 +21,7 @@ export function resolveFileRefUrl(ref: FileRef, {
   platform?: ResourceUrlPlatform | null;
   preferLocalFile?: boolean;
 }): FileRefUrlResult {
-  const isLocalTransport = !connection || connection.kind === 'local';
+  const isLocalTransport = !connection || isLocalOwnerConnection(connection);
   const getFileUrl = platform?.getFileUrl;
   const canUseLocalFile = preferLocalFile
     && isLocalTransport
@@ -29,7 +29,7 @@ export function resolveFileRefUrl(ref: FileRef, {
     && typeof getFileUrl === 'function';
 
   if (canUseLocalFile) {
-    return { mode: 'local-file', url: getFileUrl(ref.path) };
+    return { mode: 'local-file', url: appendFileRefVersion(getFileUrl(ref.path), ref) };
   }
 
   const resource = ref.resource;
@@ -40,7 +40,7 @@ export function resolveFileRefUrl(ref: FileRef, {
     }
     return {
       mode: 'resource-content',
-      url: buildConnectionUrl(connection, contentLink, { includeTokenQuery: true }),
+      url: appendFileRefVersion(buildConnectionUrl(connection, contentLink, { includeTokenQuery: true }), ref),
     };
   }
 
@@ -55,7 +55,7 @@ export function resolveFileRefUrl(ref: FileRef, {
     if (typeof getFileUrl !== 'function') {
       throw new Error('platform.getFileUrl not available and resource content link missing');
     }
-    return { mode: 'local-file', url: getFileUrl(ref.path) };
+    return { mode: 'local-file', url: appendFileRefVersion(getFileUrl(ref.path), ref) };
   }
 
   if (ref.path) {
@@ -63,4 +63,26 @@ export function resolveFileRefUrl(ref: FileRef, {
   }
 
   throw new Error(`file ref lacks local path, resource content link, and inline data: ${ref.id}`);
+}
+
+export function fileRefVersionToken(ref: Pick<FileRef, 'version'>): string | null {
+  const version = ref.version;
+  if (!version || typeof version.mtimeMs !== 'number' || typeof version.size !== 'number') return null;
+  if (!Number.isFinite(version.mtimeMs) || !Number.isFinite(version.size)) return null;
+  const parts = [String(version.mtimeMs), String(version.size)];
+  if (version.sha256) parts.push(version.sha256);
+  return parts.join('-');
+}
+
+function appendFileRefVersion(url: string, ref: FileRef): string {
+  const token = fileRefVersionToken(ref);
+  if (!token) return url;
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set('v', token);
+    return parsed.toString();
+  } catch {
+    const separator = url.includes('?') ? '&' : '?';
+    return `${url}${separator}v=${encodeURIComponent(token)}`;
+  }
 }

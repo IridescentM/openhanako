@@ -8,7 +8,7 @@
 /* ─── Section ─── */
 
 .section {
-    margin-bottom: var(--space-xl);
+    margin-bottom: var(--space-40);
 }
 
 .section:last-child {
@@ -19,12 +19,16 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: var(--space-md);
-    margin-bottom: var(--space-md);
+    gap: var(--space-16);
+    margin-bottom: var(--space-16);
+}
+
+.sectionHeaderWithDescription {
+    margin-bottom: var(--space-4);
 }
 
 .sectionTitle {
-    font-size: 1rem;
+    font-size: var(--fs-title);
     font-weight: 600;
     color: var(--text);
     letter-spacing: 0.05em;
@@ -44,26 +48,45 @@
     margin-bottom: 0;
 }
 
+.sectionDescription {
+    margin: 0 0 var(--space-16);
+    color: var(--text-muted);
+    font-size: var(--fs-caption);
+    line-height: 1.5;
+}
+
 .sectionBody {
     display: flex;
     flex-direction: column;
     background: var(--bg-card);
     border: var(--border-width, 1px) solid var(--border);
-    border-radius: var(--radius-card, 10px);
+    border-radius: var(--radius-card, 8px);
     /* 左右 padding 移到 row/warning 自己上，让分隔线能贴卡片 border */
+}
+
+.sectionCard {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-card);
+    border: var(--border-width, 1px) solid var(--border);
+    border-radius: var(--radius-card, 8px);
+}
+
+.sectionBody > .sectionCard:not(:first-child) {
+    margin-top: var(--space-16);
 }
 
 .sectionFooter {
     display: flex;
     justify-content: flex-end;
     /* 和 row 一样的 padding 节奏；border-top 作为和上一个 row 的分隔线 */
-    padding: var(--space-sm) var(--space-md);
+    padding: var(--space-8) var(--space-16);
     border-top: var(--border-width, 1px) solid var(--border);
 }
 
 /* Hero variant：用于 AboutTab */
 .sectionHero {
-    padding: var(--space-xl) var(--space-md);
+    padding: var(--space-40) var(--space-16);
     text-align: center;
 }
 
@@ -92,29 +115,43 @@
 
 /* flush 下 row 不做左右 inset（无卡片容器需要内缩），也不画 row + row divider
  * （字段本身就是独立视觉元素，靠自身的 border/bg 分隔，不需要水平线） */
-.sectionFlush .row {
+.sectionFlush > .sectionBody > .row {
     padding-left: 0;
     padding-right: 0;
 }
 
-.sectionFlush .row + .row::before {
+.sectionFlush > .sectionBody > .row + .row::before {
+    display: none;
+}
+
+/* List variant：保留卡片容器，行内去分隔线、加 hover、压缩行高 */
+.sectionList > .sectionBody > .row {
+    padding: 5px var(--space-12);
+    transition: background var(--duration-fast);
+}
+
+.sectionList > .sectionBody > .row:hover {
+    background: var(--overlay-light);
+}
+
+.sectionList > .sectionBody > .row + .row::before {
     display: none;
 }
 
 /* Section 内的警告块（sandbox 关闭时显示等）
  * 位置：卡片内，row 之后，和 row 之间用贴边的伪元素分隔线 */
 .sectionWarning {
-    padding: var(--space-sm) var(--space-md);
+    padding: var(--space-8) var(--space-16);
     color: var(--danger, #b56b66);
-    font-size: 0.75rem;
+    font-size: var(--fs-caption);
     line-height: 1.5;
     position: relative;
 }
 
 .sectionNote {
-    padding: var(--space-sm) var(--space-md);
+    padding: var(--space-8) var(--space-16);
     color: var(--text-muted);
-    font-size: 0.7rem;
+    font-size: var(--fs-hint);
     line-height: 1.4;
     position: relative;
 }
@@ -122,7 +159,7 @@
 /* ─── SubBlock ─── */
 
 .subBlock {
-    margin-bottom: var(--space-md);
+    margin-bottom: var(--space-16);
 }
 
 .subBlock:last-child {
@@ -130,16 +167,16 @@
 }
 
 .subBlockTitle {
-    font-size: 0.9rem;
+    font-size: var(--fs-body);
     font-weight: 600;
     color: var(--text-light);
-    margin: 0 0 var(--space-sm) 0;
+    margin: 0 0 var(--space-8) 0;
 }
 
 /* ─── Row ─── */
 
 .row {
-    padding: var(--space-sm) var(--space-md);
+    padding: var(--space-8) var(--space-16);
     position: relative;
 }
 
@@ -168,13 +205,13 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: var(--space-md);
+    gap: var(--space-16);
 }
 
 .rowStacked {
     display: flex;
     flex-direction: column;
-    gap: var(--space-md);
+    gap: var(--space-16);
 }
 
 .rowText {
@@ -186,13 +223,13 @@
 }
 
 .rowLabel {
-    font-size: 0.9rem;
+    font-size: var(--fs-body);
     color: var(--text);
     font-weight: 500;
 }
 
 .rowHint {
-    font-size: 0.7rem;
+    font-size: var(--fs-hint);
     color: var(--text-muted);
     line-height: 1.4;
 }
@@ -205,7 +242,7 @@
     flex-shrink: 0;
     display: flex;
     align-items: center;
-    gap: var(--space-sm);
+    gap: var(--space-8);
 }
 
 .rowStacked .rowControl {
@@ -216,20 +253,20 @@
 /* ─── ExpandableRow ─── */
 
 .expandable {
-    margin-top: var(--space-sm);
+    margin-top: var(--space-8);
 }
 
 .expandableHeader {
     display: flex;
     align-items: center;
-    gap: var(--space-xs);
+    gap: var(--space-4);
     background: none;
     border: none;
-    padding: var(--space-sm) 0;
+    padding: var(--space-8) 0;
     font-family: inherit;
-    font-size: 0.85rem;
+    font-size: var(--fs-ui);
     color: var(--text-light);
-    cursor: pointer;
+    cursor: default;
     transition: color var(--duration-fast);
     width: 100%;
     text-align: left;
@@ -242,7 +279,7 @@
 .expandableChevron {
     display: inline-block;
     transition: transform var(--duration-fast) ease;
-    font-size: 1rem;
+    font-size: var(--fs-title);
     color: var(--text-muted);
 }
 
@@ -252,14 +289,14 @@
 
 .expandableCount {
     color: var(--text-muted);
-    font-size: 0.8rem;
+    font-size: var(--fs-ui);
 }
 
 .expandableBody {
-    padding: var(--space-sm) 0 var(--space-md);
+    padding: var(--space-8) 0 var(--space-16);
     display: flex;
     flex-direction: column;
-    gap: var(--space-sm);
+    gap: var(--space-8);
 }
 
 /* ─── NumberInput（SPEC §3.6 Number-Unit Row 用）─── */
@@ -267,18 +304,18 @@
 .numberInput {
     display: flex;
     align-items: center;
-    gap: var(--space-xs);
+    gap: var(--space-4);
 }
 
 .numberInputField {
     width: 64px;
     padding: 4px 8px;
     border: var(--border-width, 1px) solid var(--border);
-    border-radius: var(--radius-input, 4px);
+    border-radius: var(--radius-input, 6px);
     background: var(--bg-card);
     color: var(--text);
     font-family: inherit;
-    font-size: 0.9rem;
+    font-size: var(--fs-body);
     text-align: right;
     transition: border-color var(--duration-slow) var(--ease-out);
 }
@@ -298,6 +335,115 @@
 }
 
 .numberInputUnit {
-    font-size: 0.9rem;
+    font-size: var(--fs-body);
     color: var(--text-muted);
+}
+
+/* ─── StepSlider（有限档位设置用）─── */
+
+.stepSlider {
+    width: 198px;
+    max-width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.stepSliderTop,
+.stepSliderTicks {
+    width: 150px;
+    max-width: 100%;
+    margin: 0 auto;
+}
+
+.stepSliderTop {
+    display: block;
+}
+
+.stepSliderInput {
+    width: 100%;
+    height: 22px;
+    margin: 0;
+    padding: 0;
+    appearance: none;
+    background: transparent;
+    cursor: default;
+}
+
+.stepSliderInput::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 999px;
+    background: linear-gradient(
+        to right,
+        var(--accent) 0%,
+        var(--accent) var(--step-slider-progress, 0%),
+        var(--border) var(--step-slider-progress, 0%),
+        var(--border) 100%
+    );
+}
+
+.stepSliderInput::-webkit-slider-thumb {
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    border-radius: 999px;
+    border: 2px solid var(--bg-card);
+    background: var(--accent);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+    transition:
+        transform var(--duration-fast) var(--ease-out),
+        box-shadow var(--duration-fast) var(--ease-out);
+}
+
+.stepSliderInput:hover::-webkit-slider-thumb,
+.stepSliderInput:focus-visible::-webkit-slider-thumb {
+    transform: scale(1.08);
+    box-shadow:
+        0 1px 4px rgba(0, 0, 0, 0.18),
+        0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.stepSliderInput::-moz-range-track {
+    height: 4px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--border);
+}
+
+.stepSliderInput::-moz-range-progress {
+    height: 4px;
+    border-radius: 999px;
+    background: var(--accent);
+}
+
+.stepSliderInput::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    border: 2px solid var(--bg-card);
+    background: var(--accent);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+}
+
+.stepSliderTicks {
+    position: relative;
+    height: 16px;
+    color: var(--text-muted);
+    font-size: var(--fs-hint);
+    line-height: 1.2;
+}
+
+.stepSliderTicks span {
+    position: absolute;
+    top: 0;
+    left: var(--step-slider-tick-left);
+    transform: translateX(-50%);
+    text-align: center;
+    white-space: nowrap;
+}
+
+.stepSliderTickActive {
+    color: var(--text);
+    font-weight: 600;
 }

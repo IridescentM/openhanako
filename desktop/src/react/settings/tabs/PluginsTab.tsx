@@ -6,6 +6,8 @@ import { t } from '../helpers';
 import styles from '../Settings.module.css';
 import { SettingsSection } from '../components/SettingsSection';
 import { SettingsRow } from '../components/SettingsRow';
+import { SelectWidget, type SelectOption } from '../widgets/SelectWidget';
+import { Toggle } from '../widgets/Toggle';
 
 const platform = window.platform;
 
@@ -220,6 +222,7 @@ export function PluginsTab() {
   /* ── full-access toggle ── */
 
   const toggleFullAccess = async () => {
+    if (pluginAllowFullAccess === undefined) return;
     const next = !pluginAllowFullAccess;
     set({ pluginAllowFullAccess: next });
     try {
@@ -238,6 +241,7 @@ export function PluginsTab() {
   };
 
   const togglePluginDevTools = async () => {
+    if (pluginDevToolsEnabled === undefined) return;
     const next = !pluginDevToolsEnabled;
     set({ pluginDevToolsEnabled: next });
     try {
@@ -438,7 +442,7 @@ export function PluginsTab() {
 
       {/* 管理插件：dropzone + 列表 + 路径提示，同一 flush section；reload 按钮放 context */}
       <SettingsSection
-        title="管理插件"
+        title={t('settings.plugins.manageTitle')}
         variant="flush"
         context={<div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>{diagnosticsButton}{reloadButton}</div>}
       >
@@ -544,7 +548,7 @@ export function PluginsTab() {
           <p style={{
             fontSize: '0.7rem',
             color: 'var(--text-muted)',
-            marginTop: 'var(--space-sm)',
+            marginTop: 'var(--space-8)',
           }}>
             {t('settings.plugins.pluginsDir', { path: pluginUserDir })}
           </p>
@@ -642,15 +646,11 @@ export function PluginsTab() {
                 onClick={() => updateConfigDraft(key, value !== true)}
               />
             ) : property.enum ? (
-              <select
-                className={styles['settings-input']}
+              <SelectWidget
+                options={property.enum.map((item): SelectOption => ({ value: String(item), label: String(item) }))}
                 value={formatConfigValue(property, value)}
-                onChange={(e) => updateConfigDraft(key, parseConfigValue(property, e.target.value))}
-              >
-                {property.enum.map((item) => (
-                  <option key={String(item)} value={String(item)}>{String(item)}</option>
-                ))}
-              </select>
+                onChange={(v) => updateConfigDraft(key, parseConfigValue(property, v))}
+              />
             ) : property.type === 'object' || property.type === 'array' ? (
               <textarea
                 className={styles['settings-input']}
@@ -684,14 +684,14 @@ export function PluginsTab() {
       )}
 
       {/* 权限：标准白卡片 row */}
-      <SettingsSection title="权限">
+      <SettingsSection title={t('settings.plugins.permissionTitle')}>
         <SettingsRow
           label={t('settings.plugins.fullAccessToggle')}
           hint={t('settings.plugins.fullAccessDesc')}
           control={
-            <button
-              className={`hana-toggle${pluginAllowFullAccess ? ' on' : ''}`}
-              onClick={toggleFullAccess}
+            <Toggle
+              on={pluginAllowFullAccess}
+              onChange={toggleFullAccess}
             />
           }
         />
@@ -699,9 +699,9 @@ export function PluginsTab() {
           label={t('settings.plugins.devToolsToggle')}
           hint={t('settings.plugins.devToolsDesc')}
           control={
-            <button
-              className={`hana-toggle${pluginDevToolsEnabled ? ' on' : ''}`}
-              onClick={togglePluginDevTools}
+            <Toggle
+              on={pluginDevToolsEnabled}
+              onChange={togglePluginDevTools}
             />
           }
         />

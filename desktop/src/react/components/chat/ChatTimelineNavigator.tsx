@@ -1,9 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, RefObject } from 'react';
+import type { RefObject } from 'react';
+import { TimelineRailNavigator, type TimelineRailItem } from '../shared/TimelineRailNavigator';
 import type { TimelineAnchor } from './timeline-anchors';
-import styles from './Chat.module.css';
-
-const TIMELINE_MAX_VISIBLE_ROWS = 10;
 
 interface MarkerLayout {
   targetTop: number;
@@ -15,10 +13,16 @@ interface Props {
   contentRef: RefObject<HTMLDivElement | null>;
   messageElementsRef: RefObject<Map<string, HTMLDivElement>>;
   active: boolean;
+  railVisible: boolean;
 }
 
 function clamp(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
   return Math.min(Math.max(value, min), max);
+}
+
+function finiteNumber(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
 export const ChatTimelineNavigator = memo(function ChatTimelineNavigator({
@@ -27,50 +31,38 @@ export const ChatTimelineNavigator = memo(function ChatTimelineNavigator({
   contentRef,
   messageElementsRef,
   active,
+  railVisible,
 }: Props) {
   const [layouts, setLayouts] = useState<Record<string, MarkerLayout>>({});
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [cardOpen, setCardOpen] = useState(false);
   const rafRef = useRef<number | null>(null);
-  const listRef = useRef<HTMLDivElement | null>(null);
+  const shouldMeasure = active && anchors.length > 0;
 
   const measure = useCallback(() => {
     const panel = scrollRef.current;
     if (!panel || anchors.length === 0) {
-      setLayouts(prev => Object.keys(prev).length === 0 ? prev : {});
+      setLayouts({});
       setActiveId(null);
       return;
     }
 
-    const maxScroll = Math.max(0, panel.scrollHeight - panel.clientHeight);
+    const maxScroll = Math.max(0, finiteNumber(panel.scrollHeight) - finiteNumber(panel.clientHeight));
     const panelRect = panel.getBoundingClientRect();
+    const panelTop = finiteNumber(panelRect.top);
+    const panelScrollTop = finiteNumber(panel.scrollTop);
     const next: Record<string, MarkerLayout> = {};
 
     for (const anchor of anchors) {
       const element = messageElementsRef.current?.get(anchor.messageId);
       if (!element) continue;
       const rect = element.getBoundingClientRect();
-      const targetTop = clamp(panel.scrollTop + rect.top - panelRect.top - 16, 0, maxScroll);
+      const targetTop = clamp(panelScrollTop + finiteNumber(rect.top) - panelTop - 16, 0, maxScroll);
       next[anchor.messageId] = {
         targetTop,
       };
     }
 
-    setLayouts(prev => {
-      // 避免无变化时产生新引用导致重渲染循环
-      if (Object.keys(prev).length === Object.keys(next).length) {
-        let changed = false;
-        for (const [id, layout] of Object.entries(next)) {
-          const prevLayout = prev[id];
-          if (!prevLayout || prevLayout.targetTop !== layout.targetTop) {
-            changed = true;
-            break;
-          }
-        }
-        if (!changed) return prev;
-      }
-      return next;
-    });
+    setLayouts(next);
   }, [anchors, messageElementsRef, scrollRef]);
 
   const updateActive = useCallback(() => {
@@ -80,7 +72,7 @@ export const ChatTimelineNavigator = memo(function ChatTimelineNavigator({
       return;
     }
 
-    const threshold = panel.scrollTop + 96;
+    const threshold = finiteNumber(panel.scrollTop) + 96;
     let nextId = anchors[0]?.messageId ?? null;
     for (const anchor of anchors) {
       const layout = layouts[anchor.messageId];
@@ -95,22 +87,27 @@ export const ChatTimelineNavigator = memo(function ChatTimelineNavigator({
   }, [anchors, layouts, scrollRef]);
 
   useLayoutEffect(() => {
+    if (!shouldMeasure) {
+      setLayouts({});
+      setActiveId(null);
+      return;
+    }
     measure();
-  }, [measure]);
+  }, [measure, shouldMeasure]);
 
   useEffect(() => {
     const panel = scrollRef.current;
-    if (!panel) return;
+    if (!panel || !shouldMeasure) return;
     const content = contentRef.current;
     const observer = new ResizeObserver(() => measure());
     observer.observe(panel);
     if (content) observer.observe(content);
     return () => observer.disconnect();
-  }, [contentRef, measure, scrollRef]);
+  }, [contentRef, measure, scrollRef, shouldMeasure]);
 
   useEffect(() => {
     const panel = scrollRef.current;
-    if (!panel || !active) return;
+    if (!panel || !shouldMeasure) return;
 
     const schedule = () => {
       if (rafRef.current != null) return;
@@ -129,7 +126,7 @@ export const ChatTimelineNavigator = memo(function ChatTimelineNavigator({
         rafRef.current = null;
       }
     };
-  }, [active, scrollRef, updateActive]);
+  }, [scrollRef, shouldMeasure, updateActive]);
 
   const jumpTo = useCallback((anchor: TimelineAnchor) => {
     const panel = scrollRef.current;
@@ -143,63 +140,24 @@ export const ChatTimelineNavigator = memo(function ChatTimelineNavigator({
     [anchors, layouts],
   );
 
-  const visibleRows = Math.min(renderedAnchors.length, TIMELINE_MAX_VISIBLE_ROWS);
-
-  useLayoutEffect(() => {
-    const list = listRef.current;
-    if (!list) return;
-    list.scrollTop = list.scrollHeight;
-  }, [renderedAnchors.length, visibleRows]);
-
   if (!active || anchors.length === 0) return null;
 
-  const cardVars: CSSProperties & { '--timeline-visible-rows': number } = {
-    '--timeline-visible-rows': Math.max(1, visibleRows),
-  };
+  const railItems: Array<TimelineRailItem<TimelineAnchor>> = renderedAnchors.map(anchor => ({
+    id: anchor.messageId,
+    label: anchor.label,
+    markerWidthEm: anchor.markerWidthEm,
+    payload: anchor,
+  }));
 
   return (
-    <nav
-      className={`${styles.timelineNav}${cardOpen ? ` ${styles.timelineNavExpanded}` : ''}`}
-      aria-label="对话轮次导航"
-      onMouseLeave={() => setCardOpen(false)}
-      onBlur={(event) => {
-        const nextFocus = event.relatedTarget;
-        if (nextFocus instanceof Node && event.currentTarget.contains(nextFocus)) return;
-        setCardOpen(false);
-      }}
-    >
-      <div
-        className={styles.timelineCard}
-        style={cardVars}
-      >
-        <div className={styles.timelineList} ref={listRef}>
-          {renderedAnchors.map((anchor) => {
-            const selected = anchor.messageId === activeId;
-            const markerStyle: CSSProperties & { '--timeline-marker-width': string } = {
-              '--timeline-marker-width': `${anchor.markerWidthEm}em`,
-            };
-            return (
-              <button
-                key={anchor.messageId}
-                type="button"
-                className={`${styles.timelineMarker}${selected ? ` ${styles.timelineMarkerActive}` : ''}`}
-                style={markerStyle}
-                aria-label={`跳转到 ${anchor.label}`}
-                title={anchor.label}
-                onFocus={() => setCardOpen(true)}
-                onClick={() => jumpTo(anchor)}
-              >
-                <span className={styles.timelineLabel}>{anchor.label}</span>
-                <span
-                  className={styles.timelineLine}
-                  aria-hidden="true"
-                  onMouseEnter={() => setCardOpen(true)}
-                />
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </nav>
+    <TimelineRailNavigator
+      items={railItems}
+      active={active}
+      activeId={activeId}
+      railVisible={railVisible}
+      ariaLabel={window.t?.('chat.timeline.navAriaLabel') || 'Turn navigation'}
+      jumpLabel={item => (window.t?.('chat.timeline.jumpTo') || 'Jump to {label}').replace('{label}', item.label)}
+      onJump={item => jumpTo(item.payload)}
+    />
   );
 });

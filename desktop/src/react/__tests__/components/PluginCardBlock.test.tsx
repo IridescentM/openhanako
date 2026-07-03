@@ -5,14 +5,26 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render } from '@testing-library/react';
 import { PluginCardBlock } from '../../components/chat/PluginCardBlock';
+import { useStore } from '../../stores';
 import {
   PLUGIN_UI_CAPABILITY,
   PLUGIN_UI_PROTOCOL,
   PLUGIN_UI_PROTOCOL_VERSION,
 } from '@hana/plugin-protocol';
 
-vi.mock('../../hooks/use-hana-fetch', () => ({
-  hanaUrl: (path: string) => `http://127.0.0.1:3210${path}`,
+vi.mock('../../hooks/use-plugin-surface-url', () => ({
+  usePluginSurfaceUrl: (routeUrl: string | null) => ({
+    iframeSrc: routeUrl ? `http://127.0.0.1:3210${routeUrl}` : null,
+    status: 'ready',
+    error: null,
+    retry: vi.fn(),
+  }),
+}));
+
+vi.mock('../../components/chat/ChatMessageSurface', () => ({
+  ChatMessageSurface: ({ sessionPath }: { sessionPath: string }) => (
+    <div data-testid="chat-surface" data-session-path={sessionPath} />
+  ),
 }));
 
 function attachIframeWindow(iframe: HTMLIFrameElement, contentWindow: Window) {
@@ -25,6 +37,7 @@ function attachIframeWindow(iframe: HTMLIFrameElement, contentWindow: Window) {
 describe('PluginCardBlock', () => {
   afterEach(() => {
     cleanup();
+    useStore.setState({ chatSessions: {} } as any);
   });
 
   it('只接受来自 iframe 自身且 origin 正确的 ready / resize 消息', () => {
@@ -117,5 +130,35 @@ describe('PluginCardBlock', () => {
     expect(iframe.style.opacity).toBe('1');
     expect(iframe.style.width).toBe('260px');
     expect(iframe.style.height).toBe('210px');
+  });
+
+  it('renders chat.surface cards as native chat transcript surfaces', () => {
+    useStore.setState({
+      chatSessions: {
+        '/sessions/private.jsonl': {
+          items: [],
+          hasMore: false,
+          loadingMore: false,
+        },
+      },
+    } as any);
+
+    const { container, getByTestId } = render(
+      <PluginCardBlock
+        card={{
+          type: 'chat.surface',
+          pluginId: 'demo',
+          sessionId: 'sess_private',
+          sessionPath: '/sessions/private.jsonl',
+          sessionRef: { sessionId: 'sess_private', sessionPath: '/sessions/private.jsonl' },
+          title: 'Private run',
+          description: 'Private transcript',
+        }}
+        agentId="butter"
+      />,
+    );
+
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(getByTestId('chat-surface').getAttribute('data-session-path')).toBe('/sessions/private.jsonl');
   });
 });

@@ -18,8 +18,14 @@ docs/superpowers/
 .superpowers/
 archived/
 devlog/
+research/
 handoff-*.md
 TODO.md
+
+# ═══════════════════════════════════════════
+# AI 生图原始素材
+# ═══════════════════════════════════════════
+**/jimeng-*.png
 
 # ═══════════════════════════════════════════
 # 构建产物
@@ -38,7 +44,7 @@ inbox/
 
 # 运行时 / 依赖
 # ═══════════════════════════════════════════
-node_modules/
+node_modules
 .pi/
 
 # IDE / 工具
@@ -56,6 +62,7 @@ __pycache__/
 *.pyc
 /index.html
 homepage/
+desktop/src/react/animation-mockup/
 
 # 环境变量 / 凭证
 .env
@@ -83,5 +90,5 @@ reviews/
 
 # Codex environments
 .codex/
-hanako-charactercard.zip
 .github/workflows/
+hanako-charactercard.zip

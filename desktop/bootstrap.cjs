@@ -127,8 +127,8 @@ try {
     error: serializeError(err),
   });
   showBootstrapError(
-    "Hanako Launch Failed",
-    `Hanako failed before HANA_HOME could be resolved.\n\n${err?.message || err}\n\nDiagnostic file:\n${diagnosticPath || diagnosticsDir}`,
+    "HanaAgent Launch Failed",
+    `HanaAgent failed before HANA_HOME could be resolved.\n\n${err?.message || err}\n\nDiagnostic file:\n${diagnosticPath || diagnosticsDir}`,
   );
   exitAfterBootstrapFailure();
 }
@@ -165,7 +165,7 @@ function verifyWindowsInstallSurfaceBeforeMain() {
     diagnosticPath,
   });
   const detail = launchIntegrity.formatInstallSurfaceError(result, diagnosticPath);
-  showBootstrapError("Hanako Launch Failed", detail);
+  showBootstrapError("HanaAgent Launch Failed", detail);
   exitAfterBootstrapFailure();
   return false;
 }
@@ -194,11 +194,35 @@ function loadDesktopMain() {
     appendLaunchLog("desktop-main-load-failed", { ...payload, diagnosticPath });
     writeLaunchMarker("desktop-main-load-failed", { diagnosticPath });
     showBootstrapError(
-      "Hanako Launch Failed",
-      `Hanako failed before the desktop main process finished loading.\n\n${err?.message || err}\n\nDiagnostic file:\n${diagnosticPath || diagnosticsDir}`,
+      "HanaAgent Launch Failed",
+      `HanaAgent failed before the desktop main process finished loading.\n\n${err?.message || err}\n\nDiagnostic file:\n${diagnosticPath || diagnosticsDir}`,
     );
     exitAfterBootstrapFailure();
   }
 }
 
-loadDesktopMain();
+function tryStartOfficePdfHelper() {
+  let helper;
+  try {
+    helper = require("./src/office-pdf-helper.cjs");
+  } catch (err) {
+    if (process.argv.some((arg) => arg === "--hana-office-html-to-pdf" || arg.startsWith("--hana-office-html-to-pdf="))) {
+      console.error("[office-pdf-helper] failed to load helper:", err?.stack || err?.message || err);
+      process.exitCode = 1;
+      try { app.exit(1); } catch {}
+      return true;
+    }
+    return false;
+  }
+  if (!helper.isOfficePdfHelperInvocation(process.argv)) return false;
+  helper.runOfficePdfHelperFromArgv(process.argv).catch((err) => {
+    console.error("[office-pdf-helper]", err?.stack || err?.message || err);
+    process.exitCode = 1;
+    try { app.exit(1); } catch {}
+  });
+  return true;
+}
+
+if (!tryStartOfficePdfHelper()) {
+  loadDesktopMain();
+}

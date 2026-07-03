@@ -90,6 +90,23 @@ export function PlatformSection({
               </button>
             )}
           </div>
+        ) : isLast ? (
+          <div className="bridge-input-row">
+            <input
+              className={styles['settings-input']}
+              type="text"
+              value={field.value}
+              onChange={(e) => field.onChange(e.target.value)}
+              onBlur={onCredentialBlur}
+            />
+            <button
+              className="bridge-test-btn"
+              disabled={testing}
+              onClick={onTest}
+            >
+              {testing ? '...' : t('settings.bridge.test')}
+            </button>
+          </div>
         ) : (
           <input
             className={styles['settings-input']}
@@ -114,7 +131,7 @@ export function PlatformSection({
       {/* 无凭据（如 WhatsApp）：只显示 hint */}
       {credentialFields.length === 0 && hint && (
         <div style={{
-          padding: 'var(--space-sm) var(--space-md)',
+          padding: 'var(--space-8) var(--space-16)',
           fontSize: '0.7rem',
           color: 'var(--text-muted)',
           lineHeight: 1.4,
@@ -127,7 +144,7 @@ export function PlatformSection({
 
       {ownerUsers && onOwnerChange && (
         <div style={{
-          padding: 'var(--space-sm) var(--space-md)',
+          padding: 'var(--space-8) var(--space-16)',
           borderTop: '1px solid var(--border)',
         }}>
           <OwnerSelect

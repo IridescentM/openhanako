@@ -9,6 +9,7 @@ const mockApplyAgentIdentity = vi.fn(async () => {});
 const mockLoadAgents = vi.fn(async () => {});
 const mockLoadAvatars = vi.fn();
 const mockLoadSessions = vi.fn(async () => {});
+const mockLoadPendingNewSessionPermissionDefault = vi.fn(async () => {});
 const mockSwitchSession = vi.fn(async () => {});
 const mockConnectWebSocket = vi.fn();
 const mockGetWebSocket = vi.fn<() => WebSocket | null>(() => null);
@@ -26,6 +27,7 @@ const mockInitViewerEvents = vi.fn();
 const mockUpdateLayout = vi.fn();
 const mockInitErrorBusBridge = vi.fn();
 const mockRefreshPluginUI = vi.fn();
+const mockInitSessionProjectCatalog = vi.fn(async () => {});
 
 vi.mock('../stores', () => ({
   useStore: {
@@ -34,6 +36,7 @@ vi.mock('../stores', () => ({
       const next = typeof patch === 'function' ? patch(mockState) : patch;
       Object.assign(mockState, next);
     },
+    subscribe: vi.fn(() => vi.fn()),
   },
 }));
 
@@ -49,7 +52,12 @@ vi.mock('../stores/agent-actions', () => ({
 
 vi.mock('../stores/session-actions', () => ({
   loadSessions: mockLoadSessions,
+  loadPendingNewSessionPermissionDefault: mockLoadPendingNewSessionPermissionDefault,
   switchSession: mockSwitchSession,
+}));
+
+vi.mock('../stores/session-project-actions', () => ({
+  initSessionProjectCatalog: mockInitSessionProjectCatalog,
 }));
 
 vi.mock('../services/websocket', () => ({
@@ -130,7 +138,7 @@ function persistedLanConnectionJson() {
     label: 'LAN Studio',
     baseUrl: 'http://192.168.31.75:14500',
     wsUrl: 'ws://192.168.31.75:14500',
-    token: 'hana_dev_remote_secret',
+    token: 'fixture-key',
     authState: 'paired',
     trustState: 'lan',
     credentialKind: 'device_credential',
@@ -153,6 +161,11 @@ describe('initApp bridge indicator', () => {
     mockLoadAgents.mockReset();
     mockLoadAvatars.mockReset();
     mockLoadSessions.mockReset();
+    mockLoadPendingNewSessionPermissionDefault.mockReset();
+    mockLoadPendingNewSessionPermissionDefault.mockImplementation(async () => {
+      mockState.pendingNewSessionPermissionMode = 'auto';
+      mockState.sessionPermissionMode = 'auto';
+    });
     mockSwitchSession.mockReset();
     mockConnectWebSocket.mockReset();
     mockGetWebSocket.mockReset();
@@ -171,6 +184,7 @@ describe('initApp bridge indicator', () => {
     mockUpdateLayout.mockReset();
     mockInitErrorBusBridge.mockReset();
     mockRefreshPluginUI.mockReset();
+    mockInitSessionProjectCatalog.mockReset();
     vi.resetModules();
   });
 
@@ -303,13 +317,13 @@ describe('initApp bridge indicator', () => {
     expect(mockHanaFetch).toHaveBeenNthCalledWith(1, '/api/web-auth/login', expect.objectContaining({
       method: 'POST',
       credentials: 'include',
-      body: JSON.stringify({ credential: 'hana_dev_remote_secret' }),
+      body: JSON.stringify({ credential: 'fixture-key' }),
     }));
     expect(mockHanaFetch).toHaveBeenNthCalledWith(2, '/api/server/identity');
     expect(mockState.activeServerConnection).toEqual(expect.objectContaining({
       connectionId: 'lan:node_lan:studio_lan',
       kind: 'lan',
-      token: 'hana_dev_remote_secret',
+      token: 'fixture-key',
       credentialKind: 'device_credential',
     }));
     expect(mockConnectWebSocket).toHaveBeenCalledTimes(1);
@@ -398,6 +412,177 @@ describe('initApp bridge indicator', () => {
     expect(mockInitJian).toHaveBeenCalledTimes(1);
   });
 
+  it('hydrates the persisted permission default before showing the pending new-session draft', async () => {
+    (globalThis as Record<string, unknown>).window = {
+      addEventListener: vi.fn(),
+      platform: {
+        getServerPort: vi.fn(async () => 62950),
+        getServerToken: vi.fn(async () => 'token'),
+        appReady: vi.fn(),
+        onSettingsChanged: vi.fn(),
+        openSettings: vi.fn(),
+      },
+      dispatchEvent: vi.fn(),
+    };
+    (globalThis as Record<string, unknown>).document = {
+      addEventListener: vi.fn(),
+    };
+    (globalThis as Record<string, unknown>).i18n = {
+      locale: 'zh-CN',
+      defaultName: 'Hanako',
+      load: vi.fn(async () => {}),
+    };
+    (globalThis as Record<string, unknown>).t = vi.fn((key: string) => key);
+
+    mockHanaFetch
+      .mockResolvedValueOnce(serverIdentityResponse())
+      .mockResolvedValueOnce(jsonResponse({ agent: 'Hanako', user: 'User', avatars: {} }))
+      .mockResolvedValueOnce(jsonResponse({ locale: 'zh-CN', desk: { home_folder: null }, cwd_history: [] }))
+      .mockResolvedValueOnce(jsonResponse({ jobs: [] }))
+      .mockResolvedValueOnce(jsonResponse({
+        telegram: { status: 'disconnected' },
+        feishu: { status: 'disconnected' },
+        qq: { status: 'disconnected' },
+        wechat: { status: 'disconnected' },
+      }));
+
+    const { initApp } = await import('../app-init');
+    await initApp();
+
+    expect(mockState.pendingNewSession).toBe(true);
+    expect(mockLoadPendingNewSessionPermissionDefault).toHaveBeenCalledTimes(1);
+    expect(mockState.pendingNewSessionPermissionMode).toBe('auto');
+    expect(mockState.sessionPermissionMode).toBe('auto');
+  });
+
+  it('refreshes local token and rebuilds websocket after server restart', async () => {
+    let restartHandler: ((data: { port: number; token?: string }) => void) | null = null;
+    (globalThis as Record<string, unknown>).window = {
+      addEventListener: vi.fn(),
+      platform: {
+        getServerPort: vi.fn(async () => 62950),
+        getServerToken: vi.fn(async () => 'old-token'),
+        appReady: vi.fn(),
+        onSettingsChanged: vi.fn(),
+        onServerRestarted: vi.fn((cb: (data: { port: number; token?: string }) => void) => {
+          restartHandler = cb;
+        }),
+        openSettings: vi.fn(),
+      },
+      dispatchEvent: vi.fn(),
+    };
+    (globalThis as Record<string, unknown>).document = {
+      addEventListener: vi.fn(),
+    };
+    (globalThis as Record<string, unknown>).i18n = {
+      locale: 'zh-CN',
+      defaultName: 'Hanako',
+      load: vi.fn(async () => {}),
+    };
+    (globalThis as Record<string, unknown>).t = vi.fn((key: string) => key);
+
+    mockHanaFetch
+      .mockResolvedValueOnce(serverIdentityResponse())
+      .mockResolvedValueOnce(jsonResponse({ agent: 'Hanako', user: 'User', avatars: {} }))
+      .mockResolvedValueOnce(jsonResponse({ locale: 'zh-CN', desk: { home_folder: '/agent-home' }, cwd_history: [] }))
+      .mockResolvedValueOnce(jsonResponse({ jobs: [] }))
+      .mockResolvedValueOnce(jsonResponse({
+        telegram: { status: 'disconnected' },
+        feishu: { status: 'disconnected' },
+        qq: { status: 'disconnected' },
+        wechat: { status: 'disconnected' },
+      }));
+
+    const { initApp } = await import('../app-init');
+    await initApp();
+
+    expect(restartHandler).toBeTypeOf('function');
+    mockConnectWebSocket.mockClear();
+
+    (restartHandler as unknown as (data: { port: number; token?: string }) => void)({ port: 63001, token: 'new-token' });
+
+    expect(mockState.serverPort).toBe('63001');
+    expect(mockState.serverToken).toBe('new-token');
+    expect(mockState.activeServerConnection).toEqual(expect.objectContaining({
+      connectionId: 'local',
+      baseUrl: 'http://127.0.0.1:63001',
+      wsUrl: 'ws://127.0.0.1:63001',
+      token: 'new-token',
+    }));
+    expect(mockConnectWebSocket).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes local restart credentials without stealing an active remote connection', async () => {
+    let restartHandler: ((data: { port: number; token?: string }) => void) | null = null;
+    (globalThis as Record<string, unknown>).window = {
+      addEventListener: vi.fn(),
+      platform: {
+        getServerPort: vi.fn(async () => 62950),
+        getServerToken: vi.fn(async () => 'old-token'),
+        appReady: vi.fn(),
+        onSettingsChanged: vi.fn(),
+        onServerRestarted: vi.fn((cb: (data: { port: number; token?: string }) => void) => {
+          restartHandler = cb;
+        }),
+        openSettings: vi.fn(),
+      },
+      dispatchEvent: vi.fn(),
+    };
+    (globalThis as Record<string, unknown>).document = {
+      addEventListener: vi.fn(),
+    };
+    (globalThis as Record<string, unknown>).i18n = {
+      locale: 'zh-CN',
+      defaultName: 'Hanako',
+      load: vi.fn(async () => {}),
+    };
+    (globalThis as Record<string, unknown>).t = vi.fn((key: string) => key);
+
+    mockHanaFetch
+      .mockResolvedValueOnce(serverIdentityResponse())
+      .mockResolvedValueOnce(jsonResponse({ agent: 'Hanako', user: 'User', avatars: {} }))
+      .mockResolvedValueOnce(jsonResponse({ locale: 'zh-CN', desk: { home_folder: '/agent-home' }, cwd_history: [] }))
+      .mockResolvedValueOnce(jsonResponse({ jobs: [] }))
+      .mockResolvedValueOnce(jsonResponse({
+        telegram: { status: 'disconnected' },
+        feishu: { status: 'disconnected' },
+        qq: { status: 'disconnected' },
+        wechat: { status: 'disconnected' },
+      }));
+
+    const { initApp } = await import('../app-init');
+    await initApp();
+
+    const local = mockState.activeServerConnection as Record<string, unknown>;
+    const remote = {
+      ...local,
+      connectionId: 'lan:node_lan:studio_lan',
+      kind: 'lan',
+      label: 'LAN Studio',
+      baseUrl: 'http://192.168.31.75:14500',
+      wsUrl: 'ws://192.168.31.75:14500',
+      token: 'remote-token',
+      trustState: 'lan',
+      credentialKind: 'device_credential',
+    };
+    Object.assign(mockState, {
+      serverConnections: { ...(mockState.serverConnections as Record<string, unknown>), [remote.connectionId]: remote },
+      activeServerConnectionId: remote.connectionId,
+      activeServerConnection: remote,
+    });
+    mockConnectWebSocket.mockClear();
+
+    (restartHandler as unknown as (data: { port: number; token?: string }) => void)({ port: 63001, token: 'new-token' });
+
+    expect((mockState.serverConnections as Record<string, any>).local).toEqual(expect.objectContaining({
+      baseUrl: 'http://127.0.0.1:63001',
+      token: 'new-token',
+    }));
+    expect(mockState.activeServerConnectionId).toBe(remote.connectionId);
+    expect(mockState.activeServerConnection).toBe(remote);
+    expect(mockConnectWebSocket).not.toHaveBeenCalled();
+  });
+
   it('refreshes the desk default workspace when settings change the current agent workspace', async () => {
     let settingsHandler: ((type: string, data: any) => void) | null = null;
     (globalThis as Record<string, unknown>).window = {
@@ -455,7 +640,7 @@ describe('initApp bridge indicator', () => {
 
     expect(mockState.homeFolder).toBe('/new-home');
     expect(mockState.selectedFolder).toBe('/new-home');
-    expect(mockActivateWorkspaceDesk).toHaveBeenCalledWith('/new-home');
+    expect(mockActivateWorkspaceDesk).toHaveBeenCalledWith('/new-home', { mountId: null });
   });
 
   it('ignores workspace changes for non-current agents', async () => {
@@ -576,7 +761,7 @@ describe('initApp bridge indicator', () => {
     expect(mockState.homeFolder).toBeNull();
     expect(mockState.selectedFolder).toBeNull();
     expect(mockState.deskBasePath).toBe('');
-    expect(mockActivateWorkspaceDesk).toHaveBeenCalledWith(null);
+    expect(mockActivateWorkspaceDesk).toHaveBeenCalledWith(null, { mountId: null });
   });
 
   it('configures context usage requests before settings and websocket handlers dispatch app events', async () => {
@@ -625,6 +810,10 @@ describe('initApp bridge indicator', () => {
     Object.assign(mockState, {
       currentSessionPath: '/session/a.jsonl',
       chatSessions: {},
+      sessions: [],
+      streamingSessions: [],
+      // 真实 slice 对无 active entry 的移除是 no-op 且 applied=true（identitiesMatch 对 undefined 返回 true）
+      removeStreamingSession: vi.fn(() => true),
     });
     (settingsHandler as unknown as (type: string, data: any) => void)('models-changed', {});
 

@@ -6,6 +6,7 @@ import type { McpConnector } from './types';
 interface ConnectorListProps {
   connectors: McpConnector[];
   globalEnabled: boolean;
+  loading?: boolean;
   busyKey: string | null;
   onAction: (connectorId: string, action: 'start' | 'stop' | 'refresh-tools') => void;
   onEdit: (connectorId: string) => void;
@@ -17,6 +18,7 @@ interface ConnectorListProps {
 export function ConnectorList({
   connectors,
   globalEnabled,
+  loading = false,
   busyKey,
   onAction,
   onEdit,
@@ -24,6 +26,10 @@ export function ConnectorList({
   onOAuthStart,
   onOAuthLogout,
 }: ConnectorListProps) {
+  if (loading) {
+    return <p className={styles['settings-muted-note']}>{t('status.loading')}</p>;
+  }
+
   if (connectors.length === 0) {
     return <p className={styles['settings-muted-note']}>{t('settings.mcp.noConnectors')}</p>;
   }
@@ -88,7 +94,7 @@ export function ConnectorList({
             <button
               className={styles['pv-add-form-btn']}
               type="button"
-              disabled={!globalEnabled || busyKey === `start-${connector.id}` || connector.status === 'running'}
+              disabled={!globalEnabled || busyKey === `start-${connector.id}` || !canStart(connector.status)}
               onClick={() => onAction(connector.id, 'start')}
             >
               {t('settings.mcp.start')}
@@ -96,7 +102,7 @@ export function ConnectorList({
             <button
               className={styles['pv-add-form-btn']}
               type="button"
-              disabled={busyKey === `stop-${connector.id}` || connector.status !== 'running'}
+              disabled={busyKey === `stop-${connector.id}` || !canStop(connector.status)}
               onClick={() => onAction(connector.id, 'stop')}
             >
               {t('settings.mcp.stop')}
@@ -140,7 +146,36 @@ function connectorTarget(connector: McpConnector): string {
 }
 
 function statusLabel(connector: McpConnector): string {
-  return connector.status === 'running' ? t('settings.mcp.statusRunning') : t('settings.mcp.statusStopped');
+  switch (connector.status) {
+    case 'running':
+      return t('settings.mcp.statusRunning');
+    case 'connecting':
+      return t('settings.mcp.statusConnecting');
+    case 'reconnecting':
+      return t('settings.mcp.statusReconnecting');
+    case 'failed':
+      return t('settings.mcp.statusFailed');
+    case 'needs-auth':
+      return t('settings.mcp.statusNeedsAuth');
+    case 'stopped':
+    default:
+      return t('settings.mcp.statusStopped');
+  }
+}
+
+// Start is offered whenever the connector is not already live or actively
+// trying to connect — including failed/needs-auth, so the user can retry.
+function canStart(status: McpConnector['status']): boolean {
+  return status === 'stopped' || status === 'failed' || status === 'needs-auth';
+}
+
+// Stop is offered whenever there is something to tear down: a live session, an
+// in-flight connect, or a reconnect/needs-auth loop the user may want to halt.
+function canStop(status: McpConnector['status']): boolean {
+  return status === 'running'
+    || status === 'connecting'
+    || status === 'reconnecting'
+    || status === 'needs-auth';
 }
 
 function transportLabel(transport: string): string {

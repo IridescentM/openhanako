@@ -17,6 +17,7 @@ export function AgentCreateOverlay() {
   const [dragActive, setDragActive] = useState(false);
   const [cardPlan, setCardPlan] = useState<CharacterCardPlan | null>(null);
   const [importMemory, setImportMemory] = useState(false);
+  const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -26,6 +27,7 @@ export function AgentCreateOverlay() {
       setYuan('hanako');
       setCardPlan(null);
       setImportMemory(false);
+      setError('');
       setVisible(true);
       requestAnimationFrame(() => inputRef.current?.focus());
     };
@@ -38,14 +40,21 @@ export function AgentCreateOverlay() {
     setCardPlan(null);
     setImportMemory(false);
     setDragActive(false);
+    setError('');
   }, []);
 
   const create = async () => {
     if (creating) return;
     const trimmed = name.trim();
-    if (!trimmed) { showToast(t('settings.agent.nameRequired'), 'error'); return; }
+    if (!trimmed) {
+      const message = t('settings.agent.nameRequired');
+      setError(message);
+      showToast(message, 'error');
+      return;
+    }
 
     setCreating(true);
+    setError('');
     try {
       const res = await hanaFetch('/api/agents', {
         method: 'POST',
@@ -58,7 +67,9 @@ export function AgentCreateOverlay() {
       close();
       showToast(t('settings.agent.created', { name: data.name }), 'success');
     } catch (err: any) {
-      showToast(t('settings.agent.createFailed') + ': ' + err.message, 'error');
+      const message = t('settings.agent.createFailed') + ': ' + err.message;
+      setError(message);
+      showToast(message, 'error');
     } finally {
       setCreating(false);
     }
@@ -80,7 +91,7 @@ export function AgentCreateOverlay() {
       setCardPlan(data.plan);
       setImportMemory(false);
     } catch (err: any) {
-      showToast('角色卡读取失败: ' + err.message, 'error');
+      showToast(t('settings.characterCard.readFailed') + ': ' + err.message, 'error');
     } finally {
       setPlanning(false);
       setDragActive(false);
@@ -104,7 +115,7 @@ export function AgentCreateOverlay() {
       close();
       showToast(t('settings.agent.created', { name: data.agent.name }), 'success');
     } catch (err: any) {
-      showToast('角色卡导入失败: ' + err.message, 'error');
+      showToast(t('settings.characterCard.importFailed') + ': ' + err.message, 'error');
     } finally {
       setCreating(false);
     }
@@ -133,7 +144,10 @@ export function AgentCreateOverlay() {
             type="text"
             placeholder={t('settings.agent.namePlaceholder')}
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              setName(e.target.value);
+              setError('');
+            }}
             disabled={creating}
             onKeyDown={(e) => {
               if (e.key === 'Enter') { e.preventDefault(); create(); }
@@ -141,6 +155,7 @@ export function AgentCreateOverlay() {
             }}
           />
         </div>
+        {error && <div className={styles['settings-inline-error']} role="alert">{error}</div>}
         <div className={styles['settings-form-field']}>
           <div className="yuan-selector">
             <div className="yuan-chips">
@@ -193,7 +208,7 @@ export function AgentCreateOverlay() {
             }}
           >
             <span className={styles['character-card-drop-plus']}>+</span>
-            <span>{planning ? '正在读取角色卡' : '拖入角色卡或点击打开'}</span>
+            <span>{planning ? t('settings.characterCard.readingCard') : t('settings.characterCard.dropOrClick')}</span>
           </button>
         </div>
         <div className={styles['agent-create-actions']}>

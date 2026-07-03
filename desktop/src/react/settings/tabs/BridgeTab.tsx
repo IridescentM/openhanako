@@ -1,48 +1,72 @@
 import React from 'react';
 import { t } from '../helpers';
-import { Toggle } from '../widgets/Toggle';
 import { PlatformSection } from './bridge/PlatformSection';
 import { WechatSection } from './bridge/WechatSection';
 import { useBridgeState } from './bridge/useBridgeState';
 import { BridgeAgentRow } from './bridge/BridgeAgentRow';
+import { BridgePermissionModeSelect, type BridgePermissionMode } from './bridge/BridgeWidgets';
 import { SettingsSection } from '../components/SettingsSection';
 import { SettingsRow } from '../components/SettingsRow';
+import { Toggle } from '../widgets/Toggle';
+import { useSettingsStore } from '../store';
 import styles from '../Settings.module.css';
 
 export function BridgeTab() {
   const b = useBridgeState();
+  const snapshotBridge = useSettingsStore(s => s.settingsSnapshot.data?.preferences?.bridge);
   // 注意：不能用 `|| {}` 兜底——空对象会让 Toggle 的 `!!status?.enabled` 显示成"假关"。
   // 传 undefined 让 Toggle 走加载态。
   const tgInfo = b.status?.telegram;
   const fsInfo = b.status?.feishu;
+  const dtInfo = b.status?.dingtalk;
   const qqInfo = b.status?.qq;
   const wxInfo = b.status?.wechat;
-  const readOnly = b.status ? b.status.readOnly === true : undefined;
-  const receiptEnabled = b.status ? b.status.receiptEnabled !== false : undefined;
-  const globalSettingsPending = !b.status || b.globalSettingsSaving;
+  const permissionMode = (b.status?.permissionMode || snapshotBridge?.permissionMode) as BridgePermissionMode | undefined;
+  const receiptEnabled = typeof b.status?.receiptEnabled === 'boolean'
+    ? b.status.receiptEnabled
+    : snapshotBridge?.receiptEnabled;
+  const richStreamingEnabled = typeof b.status?.richStreamingEnabled === 'boolean'
+    ? b.status.richStreamingEnabled
+    : snapshotBridge
+      ? snapshotBridge.richStreamingEnabled !== false
+      : undefined;
+  const globalSettingsPending = !permissionMode || b.globalSettingsSaving;
 
   return (
     <div className={`${styles['settings-tab-content']} ${styles['active']}`} data-tab="bridge">
       <SettingsSection title={t('settings.bridge.globalSettings')}>
+        <SettingsRow
+          label={t('settings.bridge.permissionMode')}
+          hint={t('settings.bridge.permissionModeDesc')}
+          control={
+            <BridgePermissionModeSelect
+              value={permissionMode}
+              onChange={(mode) => b.saveGlobalSettings({ permissionMode: mode })}
+              disabled={globalSettingsPending}
+            />
+          }
+        />
         <SettingsRow
           label={t('settings.bridge.receiptEnabled')}
           hint={t('settings.bridge.receiptEnabledDesc')}
           control={
             <Toggle
               on={receiptEnabled}
+              ariaLabel={t('settings.bridge.receiptEnabled')}
               onChange={(on) => b.saveGlobalSettings({ receiptEnabled: on })}
-              disabled={globalSettingsPending}
+              disabled={b.globalSettingsSaving}
             />
           }
         />
         <SettingsRow
-          label={t('settings.bridge.readOnly')}
-          hint={t('settings.bridge.readOnlyDesc')}
+          label={t('settings.bridge.richStreamingEnabled')}
+          hint={t('settings.bridge.richStreamingEnabledDesc')}
           control={
             <Toggle
-              on={readOnly}
-              onChange={(on) => b.saveGlobalSettings({ readOnly: on })}
-              disabled={globalSettingsPending}
+              on={richStreamingEnabled}
+              ariaLabel={t('settings.bridge.richStreamingEnabled')}
+              onChange={(on) => b.saveGlobalSettings({ richStreamingEnabled: on })}
+              disabled={b.globalSettingsSaving}
             />
           }
         />
@@ -59,12 +83,12 @@ export function BridgeTab() {
 
       {/* 对外意识：hint 在上、textarea 在下，直接作为 section body children（单 textarea 不套 row） */}
       <SettingsSection title={t('settings.agent.publicIshiki')}>
-        <div style={{ padding: 'var(--space-sm) var(--space-md)' }}>
+        <div style={{ padding: 'var(--space-8) var(--space-16)' }}>
           <div style={{
             fontSize: '0.7rem',
             color: 'var(--text-muted)',
             lineHeight: 1.5,
-            marginBottom: 'var(--space-sm)',
+            marginBottom: 'var(--space-8)',
             whiteSpace: 'pre-line',
           }}>
             {t('settings.agent.publicIshikiHint')}
@@ -85,6 +109,15 @@ export function BridgeTab() {
           {t('settings.bridge.howTo')}
         </span>
       </div>
+
+      {/* 微信 */}
+      <WechatSection
+        status={wxInfo}
+        showToast={b.showToast}
+        onSaveConfig={(creds, enabled) => b.saveBridgeConfig('wechat', creds, enabled)}
+        onReload={b.loadStatus}
+        agentId={b.selectedAgentId}
+      />
 
       {/* Telegram */}
       <PlatformSection
@@ -140,6 +173,51 @@ export function BridgeTab() {
         onOwnerChange={(userId) => b.setOwner('feishu', userId)}
       />
 
+      {/* 钉钉 */}
+      <PlatformSection
+        platform="dingtalk"
+        title={t('settings.bridge.dingtalk')}
+        status={dtInfo}
+        credentialFields={[
+          { key: 'clientId', label: t('settings.bridge.dingtalkClientId'), type: 'text', value: b.dtClientId, onChange: b.setDtClientId },
+          { key: 'clientSecret', label: t('settings.bridge.dingtalkClientSecret'), type: 'secret', value: b.dtClientSecret, onChange: b.setDtClientSecret },
+          { key: 'robotCode', label: t('settings.bridge.dingtalkRobotCode'), type: 'text', value: b.dtRobotCode, onChange: b.setDtRobotCode },
+          { key: 'restBaseUrl', label: t('settings.bridge.dingtalkRestBaseUrl'), type: 'text', value: b.dtRestBaseUrl, onChange: b.setDtRestBaseUrl },
+        ]}
+        onToggle={async (on) => {
+          if (on && (!b.dtClientId.trim() || !b.dtClientSecret.trim() || !b.dtRobotCode.trim() || !b.dtRestBaseUrl.trim())) { b.showToast(t('settings.bridge.noDingtalkCredentials'), 'error'); return; }
+          await b.saveBridgeConfig('dingtalk', {
+            clientId: b.dtClientId.trim(),
+            clientSecret: b.dtClientSecret.trim(),
+            robotCode: b.dtRobotCode.trim(),
+            restBaseUrl: b.dtRestBaseUrl.trim(),
+          }, on);
+        }}
+        onTest={() => {
+          if (!b.dtClientId.trim() || !b.dtClientSecret.trim() || !b.dtRobotCode.trim() || !b.dtRestBaseUrl.trim()) { b.showToast(t('settings.bridge.noDingtalkCredentials'), 'error'); return; }
+          b.testPlatform('dingtalk', {
+            clientId: b.dtClientId.trim(),
+            clientSecret: b.dtClientSecret.trim(),
+            robotCode: b.dtRobotCode.trim(),
+            restBaseUrl: b.dtRestBaseUrl.trim(),
+          });
+        }}
+        onCredentialBlur={async () => {
+          if (b.dtClientId.trim() && b.dtClientSecret.trim() && b.dtRobotCode.trim() && b.dtRestBaseUrl.trim())
+            await b.saveBridgeConfig('dingtalk', {
+              clientId: b.dtClientId.trim(),
+              clientSecret: b.dtClientSecret.trim(),
+              robotCode: b.dtRobotCode.trim(),
+              restBaseUrl: b.dtRestBaseUrl.trim(),
+            }, undefined);
+        }}
+        testing={b.testingPlatform === 'dingtalk'}
+        hint={t('settings.bridge.dingtalkHint')}
+        ownerUsers={b.status?.knownUsers?.dingtalk || []}
+        currentOwner={b.status?.owner?.dingtalk}
+        onOwnerChange={(userId) => b.setOwner('dingtalk', userId)}
+      />
+
       {/* QQ */}
       <PlatformSection
         platform="qq"
@@ -166,15 +244,6 @@ export function BridgeTab() {
         ownerUsers={b.status?.knownUsers?.qq || []}
         currentOwner={b.status?.owner?.qq}
         onOwnerChange={(userId) => b.setOwner('qq', userId)}
-      />
-
-      {/* 微信 */}
-      <WechatSection
-        status={wxInfo}
-        showToast={b.showToast}
-        onSaveConfig={(creds, enabled) => b.saveBridgeConfig('wechat', creds, enabled)}
-        onReload={b.loadStatus}
-        agentId={b.selectedAgentId}
       />
     </div>
   );

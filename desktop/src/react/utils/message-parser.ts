@@ -6,7 +6,7 @@
  */
 
 import { QUOTE_ORIGINAL_END, QUOTE_ORIGINAL_START } from './quoted-selection';
-import { moodLabelForYuan } from '../../../../shared/yuan-visuals.js';
+import { moodLabelForYuan } from '../../../../shared/yuan-visuals.ts';
 
 // ── Mood 解析 ──
 
@@ -42,6 +42,8 @@ export interface ParsedAttachments {
   files: Array<{ path: string; name: string; isDirectory: boolean }>;
   attachedImages: Array<{ path: string; name: string }>;
   attachedVideos: Array<{ path: string; name: string }>;
+  attachedAudios: Array<{ path: string; name: string }>;
+  sessionFileRefs: Array<{ fileId: string; sessionPath?: string; label: string; kind: string }>;
   deskContext: { dir: string; fileCount: number } | null;
   quotedText: string | null;
 }
@@ -51,16 +53,49 @@ function baseName(p: string): string {
   return normalized.split('/').pop() || p;
 }
 
+function parseSessionFileMarker(line: string): { fileId: string; sessionPath?: string; label: string; kind: string } | null {
+  const match = line.match(/^\[SessionFile\]\s+(\{[\s\S]*\})\s*$/);
+  if (!match) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  const fileId = typeof record.fileId === 'string' ? record.fileId.trim() : '';
+  if (!fileId) return null;
+  const sessionPath = typeof record.sessionPath === 'string' && record.sessionPath.trim()
+    ? record.sessionPath
+    : undefined;
+  const label = typeof record.label === 'string' && record.label.trim()
+    ? record.label
+    : fileId;
+  const kind = typeof record.kind === 'string' && record.kind.trim()
+    ? record.kind
+    : 'attachment';
+  return {
+    fileId,
+    ...(sessionPath ? { sessionPath } : {}),
+    label,
+    kind,
+  };
+}
+
 export function parseUserAttachments(content: string): ParsedAttachments {
-  if (!content) return { text: '', files: [], attachedImages: [], attachedVideos: [], deskContext: null, quotedText: null };
+  if (!content) return { text: '', files: [], attachedImages: [], attachedVideos: [], attachedAudios: [], sessionFileRefs: [], deskContext: null, quotedText: null };
   const lines = content.split('\n');
   const textLines: string[] = [];
   const files: Array<{ path: string; name: string; isDirectory: boolean }> = [];
   const attachedImages: Array<{ path: string; name: string }> = [];
   const attachedVideos: Array<{ path: string; name: string }> = [];
+  const attachedAudios: Array<{ path: string; name: string }> = [];
+  const sessionFileRefs: Array<{ fileId: string; sessionPath?: string; label: string; kind: string }> = [];
   const attachRe = /^\[(附件|目录|参考文档)\]\s+(.+)$/;
   const attachedImageRe = /^\[attached_image:\s*(.+?)\]\s*$/;
   const attachedVideoRe = /^\[attached_video:\s*(.+?)\]\s*$/;
+  const attachedAudioRe = /^\[attached_audio:\s*(.+?)\]\s*$/;
   let deskContext: { dir: string; fileCount: number } | null = null;
   let quotedText: string | null = null;
   let inDeskBlock = false;
@@ -84,6 +119,13 @@ export function parseUserAttachments(content: string): ParsedAttachments {
     if (pendingQuoteOriginal && line === QUOTE_ORIGINAL_START) {
       inQuoteOriginal = true;
       quoteOriginalLines = [];
+      continue;
+    }
+
+    const sessionFileRef = parseSessionFileMarker(line);
+    if (sessionFileRef) {
+      pendingQuoteOriginal = false;
+      sessionFileRefs.push(sessionFileRef);
       continue;
     }
 
@@ -127,6 +169,14 @@ export function parseUserAttachments(content: string): ParsedAttachments {
       continue;
     }
 
+    const attachedAudioMatch = line.match(attachedAudioRe);
+    if (attachedAudioMatch) {
+      pendingQuoteOriginal = false;
+      const p = attachedAudioMatch[1].trim();
+      attachedAudios.push({ path: p, name: baseName(p) });
+      continue;
+    }
+
     const m = line.match(attachRe);
     if (m) {
       const isDir = m[1] === '目录';
@@ -140,13 +190,14 @@ export function parseUserAttachments(content: string): ParsedAttachments {
     }
   }
   const text = textLines.join('\n').replace(/\n+$/, '').trim();
-  return { text, files, attachedImages, attachedVideos, deskContext, quotedText };
+  return { text, files, attachedImages, attachedVideos, attachedAudios, sessionFileRefs, deskContext, quotedText };
 }
 
 // ── 工具详情提取 ──
 
 export function truncatePath(p: string): string {
-  return p || '';
+  if (!p || p.length <= 35) return p;
+  return '…' + p.slice(-34);
 }
 
 export function extractHostname(u: string): string {
@@ -154,8 +205,9 @@ export function extractHostname(u: string): string {
   try { return new URL(u).hostname; } catch { return u; }
 }
 
-export function truncateHead(s: string, _max: number): string {
-  return s || '';
+export function truncateHead(s: string, max: number): string {
+  if (!s || s.length <= max) return s;
+  return s.slice(0, max - 1) + '…';
 }
 
 export interface ToolDetail {
@@ -178,15 +230,29 @@ export function extractToolDetail(name: string, args: Record<string, unknown> | 
       const p = (args.file_path || args.path || '') as string;
       return { text: truncatePath(p), href: p || undefined, hrefType: 'file' };
     }
-    case 'bash': {
-      const command = typeof args.command === 'string' ? args.command : '';
-      return { text: truncateHead(command, 120), title: command || undefined };
+    case 'bash':
+    case 'exec_command': {
+      const command = typeof args.command === 'string'
+        ? args.command
+        : typeof args.cmd === 'string'
+          ? args.cmd
+          : '';
+      return { text: truncateHead(command, 40), title: command || undefined };
+    }
+    case 'terminal':
+    case 'write_stdin': {
+      const command = typeof args.command === 'string'
+        ? args.command
+        : typeof args.chars === 'string'
+          ? args.chars
+          : '';
+      return { text: truncateHead(command, 40), title: command || undefined };
     }
     case 'glob':
     case 'find':
       return { text: (args.pattern || '') as string };
     case 'grep':
-      return { text: truncateHead((args.pattern || '') as string, 100) +
+      return { text: truncateHead((args.pattern || '') as string, 30) +
         (args.path ? ` in ${truncatePath(args.path as string)}` : '') };
     case 'ls': {
       const p = (args.path || '') as string;
@@ -197,35 +263,37 @@ export function extractToolDetail(name: string, args: Record<string, unknown> | 
       return { text: extractHostname(url), href: url || undefined, hrefType: 'url' };
     }
     case 'web_search':
-      return { text: truncateHead((args.query || '') as string, 100) };
+      return { text: truncateHead((args.query || '') as string, 40) };
     case 'browser': {
       const url = (args.url || '') as string;
       return { text: extractHostname(url), href: url || undefined, hrefType: 'url' };
     }
     case 'search_memory':
-      return { text: truncateHead((args.query || '') as string, 100) };
+      return { text: truncateHead((args.query || '') as string, 40) };
     case 'subagent':
-      return { text: truncateHead((args.task || '') as string, 100) };
-    case 'wait':
-      return { text: `${args.seconds || '?'}s` };
+      return { text: truncateHead((args.task || '') as string, 30) };
     case 'dm':
       return { text: (args.to || '') as string };
     case 'channel':
       return { text: (args.channel || args.name || '') as string };
     case 'cron':
-      return { text: truncateHead((args.label || args.prompt || '') as string, 100) };
+      return { text: truncateHead((args.label || args.prompt || '') as string, 30) };
     case 'notify':
-      return { text: truncateHead((args.title || '') as string, 100) };
+      return { text: truncateHead((args.title || '') as string, 30) };
     case 'create_artifact':
-      return { text: truncateHead((args.title || '') as string, 100) };
-    case 'install_skill':
-      return { text: (args.skill_name || '') as string };
+      return { text: truncateHead((args.title || '') as string, 30) };
+    case 'install_skill': {
+      const sourceType = args.source && typeof args.source === 'object' && 'type' in args.source
+        ? (args.source as { type?: unknown }).type
+        : '';
+      return { text: truncateHead((args.skill_name || args.github_url || args.local_path || args.fileId || sourceType || '') as string, 40) };
+    }
     case 'update_settings':
       return { text: (args.key || args.setting || '') as string };
     default: {
       // 插件工具：取第一个有意义的字符串参数作详情
       const first = Object.values(args).find(v => typeof v === 'string' && v.length > 0);
-      return { text: first ? truncateHead(first as string, 100) : '' };
+      return { text: first ? truncateHead(first as string, 30) : '' };
     }
   }
 }

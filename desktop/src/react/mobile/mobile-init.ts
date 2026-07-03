@@ -1,5 +1,6 @@
 import { useStore } from '../stores';
 import { hanaFetch } from '../hooks/use-hana-fetch';
+import { sessionIdForPathFromLocatorState, sessionScopedValue } from '../stores/session-slice';
 import { applyAgentIdentity, loadAvatars } from '../stores/agent-actions';
 import { activateWorkspaceDesk } from '../stores/desk-actions';
 import { loadMessages } from '../stores/session-actions';
@@ -9,7 +10,10 @@ import { configureWsMessageHandler } from '../services/ws-message-handler';
 import { createBrowserServerConnection, upsertServerConnection, type ServerIdentity } from '../services/server-connection';
 import { loadModels } from '../utils/ui-helpers';
 import { applySyncedAppearancePreferences, type SyncedAppearancePreferences } from '../services/appearance-sync';
-import type { Agent, Session } from '../types';
+import { applyChatLayout } from '../chat/layout';
+import { applyEditorTypography } from '../editor/typography';
+import type { ThinkingLevel } from '../stores/model-slice';
+import type { Agent, Session, SessionPermissionMode } from '../types';
 
 export interface MobilePrincipal {
   kind?: string | null;
@@ -41,6 +45,10 @@ export interface MobileBootstrap {
   homeFolder?: string | null;
   cwdHistory?: string[];
   memoryMasterEnabled?: boolean;
+  memoryEnabled?: boolean;
+  thinkingLevel?: ThinkingLevel;
+  chat?: unknown;
+  editor?: unknown;
   avatars?: Record<string, boolean>;
   agents?: Agent[];
   appearance?: SyncedAppearancePreferences;
@@ -72,11 +80,21 @@ export async function initializeMobileRuntime(principal: MobilePrincipal): Promi
     serverPort: window.location.port || null,
     serverToken: null,
     currentTab: 'chat',
+    sidebarOpen: false,
+    jianOpen: false,
+    previewOpen: false,
+    currentSessionPath: null,
+    pendingSessionSwitchPath: null,
+    pendingNewSession: true,
+    welcomeVisible: true,
   });
 
   const bootstrapRes = await hanaFetch('/api/mobile/bootstrap');
   const bootstrap = await bootstrapRes.json() as MobileBootstrap;
+  const permissionDefault = await rawJson<{ permissionMode?: SessionPermissionMode }>('/api/preferences/session-permission-default');
   applySyncedAppearancePreferences(bootstrap.appearance);
+  applyEditorTypography(bootstrap.editor);
+  applyChatLayout(bootstrap.chat);
 
   if (window.i18n?.load) {
     await window.i18n.load(bootstrap.locale || 'zh-CN');
@@ -108,13 +126,19 @@ export async function initializeMobileRuntime(principal: MobilePrincipal): Promi
       memoryMasterEnabled: typeof bootstrap.memoryMasterEnabled === 'boolean'
         ? bootstrap.memoryMasterEnabled
         : currentAgent.memoryMasterEnabled !== false,
+      memoryEnabled: typeof bootstrap.memoryEnabled === 'boolean' ? bootstrap.memoryEnabled : useStore.getState().memoryEnabled,
+      ...(bootstrap.thinkingLevel ? { thinkingLevel: bootstrap.thinkingLevel } : {}),
     });
   }
   loadAvatars(bootstrap.avatars);
+  if (isSessionPermissionMode(permissionDefault.permissionMode)) {
+    useStore.getState().setPendingNewSessionPermissionMode(permissionDefault.permissionMode);
+  }
 
   await Promise.all([
     loadModels(),
-    loadMobileSessions({ selectFirst: true }),
+    loadMobileSessions({ selectFirst: false }),
+    activateMobileWelcomeDesk(),
   ]);
 
   connectWebSocket();
@@ -130,7 +154,7 @@ export async function loadMobileSessions({
   const res = await hanaFetch('/api/sessions');
   const sessions = await res.json() as Session[];
   const next = Array.isArray(sessions) ? sessions : [];
-  useStore.setState({ sessions: next });
+  useStore.getState().setSessions(next);
 
   const state = useStore.getState();
   const currentStillExists = !!state.currentSessionPath && next.some((session) => session.path === state.currentSessionPath);
@@ -143,10 +167,12 @@ export async function loadMobileSessions({
 
   if (target && target !== state.currentSessionPath) {
     await switchMobileSession(target, targetSession);
-  } else if (target && !useStore.getState().chatSessions[target]) {
+  } else if (target && !sessionScopedValue(useStore.getState(), useStore.getState().chatSessions, target)) {
+    syncMobilePermissionMode(targetSession);
     await activateMobileSessionDesk(targetSession);
     await loadMessages(target);
   } else if (target) {
+    syncMobilePermissionMode(targetSession);
     await activateMobileSessionDesk(targetSession);
   } else if (!target) {
     useStore.setState({
@@ -160,13 +186,26 @@ export async function loadMobileSessions({
   return next;
 }
 
-export async function switchMobileSession(path: string, session?: Pick<Session, 'cwd'> | null): Promise<void> {
-  useStore.setState({
+export async function switchMobileSession(path: string, session?: Pick<Session, 'cwd' | 'permissionMode' | 'sessionId'> | null): Promise<void> {
+  useStore.setState((state) => {
+    const sessionId = typeof session?.sessionId === 'string' && session.sessionId.trim()
+      ? session.sessionId.trim()
+      : sessionIdForPathFromLocatorState(state, path);
+    return {
     currentSessionPath: path,
+    currentSessionId: sessionId,
+    ...(sessionId ? {
+      sessionLocatorsById: {
+        ...state.sessionLocatorsById,
+        [sessionId]: { path },
+      },
+    } : {}),
     pendingSessionSwitchPath: path,
     pendingNewSession: false,
     welcomeVisible: false,
+    };
   });
+  syncMobilePermissionMode(session || null);
   try {
     await activateMobileSessionDesk(session || null);
     await loadMessages(path);
@@ -186,6 +225,7 @@ export async function createMobileSession(): Promise<string | null> {
   };
   if (state.selectedFolder) body.cwd = state.selectedFolder;
   if (state.workspaceFolders?.length) body.workspaceFolders = state.workspaceFolders;
+  if (state.pendingNewSessionThinkingLevel) body.thinkingLevel = state.pendingNewSessionThinkingLevel;
   if (state.selectedAgentId && state.selectedAgentId !== state.currentAgentId) {
     body.agentId = state.selectedAgentId;
   }
@@ -197,25 +237,36 @@ export async function createMobileSession(): Promise<string | null> {
   });
   const data = await res.json() as {
     path?: string;
+    sessionId?: string | null;
     cwd?: string | null;
     workspaceFolders?: string[];
     agentId?: string | null;
     agentName?: string | null;
+    permissionMode?: SessionPermissionMode | null;
   };
   if (!data.path) return null;
   const patch: Record<string, unknown> = {
     currentSessionPath: data.path,
+    currentSessionId: typeof data.sessionId === 'string' && data.sessionId.trim() ? data.sessionId.trim() : null,
     pendingSessionSwitchPath: null,
     pendingNewSession: false,
     welcomeVisible: false,
+    pendingNewSessionThinkingLevel: null,
     workspaceFolders: Array.isArray(data.workspaceFolders) ? data.workspaceFolders : [],
     selectedAgentId: null,
   };
+  if (patch.currentSessionId) {
+    patch.sessionLocatorsById = {
+      ...useStore.getState().sessionLocatorsById,
+      [patch.currentSessionId as string]: { path: data.path },
+    };
+  }
   if (data.agentId) {
     patch.currentAgentId = data.agentId;
     if (data.agentName) patch.agentName = data.agentName;
   }
   useStore.setState(patch);
+  syncMobilePermissionMode(data);
   useStore.getState().initSession(data.path, [], false);
   await activateMobileSessionDesk({ cwd: data.cwd || null });
   await loadMobileSessions();
@@ -225,6 +276,27 @@ export async function createMobileSession(): Promise<string | null> {
 
 async function activateMobileSessionDesk(session: Pick<Session, 'cwd'> | null | undefined): Promise<void> {
   await activateWorkspaceDesk(session?.cwd || null);
+}
+
+async function activateMobileWelcomeDesk(): Promise<void> {
+  const state = useStore.getState();
+  await activateWorkspaceDesk(state.selectedFolder || state.homeFolder || null);
+  useStore.setState({ previewOpen: false });
+}
+
+function syncMobilePermissionMode(session: Pick<Session, 'permissionMode'> | null | undefined): void {
+  const mode = session?.permissionMode;
+  if (!isSessionPermissionMode(mode)) return;
+  window.dispatchEvent(new CustomEvent('hana-plan-mode', {
+    detail: {
+      enabled: mode === 'read_only',
+      mode,
+    },
+  }));
+}
+
+function isSessionPermissionMode(value: unknown): value is SessionPermissionMode {
+  return value === 'auto' || value === 'operate' || value === 'ask' || value === 'read_only';
 }
 
 function configureMobileMessageHandlers(): void {

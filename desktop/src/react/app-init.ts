@@ -10,7 +10,8 @@
 import { useStore } from './stores';
 import { hanaFetch } from './hooks/use-hana-fetch';
 import { applyAgentIdentity, loadAgents, loadAvatars } from './stores/agent-actions';
-import { loadSessions } from './stores/session-actions';
+import { loadPendingNewSessionPermissionDefault, loadSessions, switchSession } from './stores/session-actions';
+import { initSessionProjectCatalog } from './stores/session-project-actions';
 import { connectWebSocket, getWebSocket } from './services/websocket';
 import { setStatus, loadModels } from './utils/ui-helpers';
 import { initJian } from './stores/desk-actions';
@@ -19,8 +20,10 @@ import { updateLayout } from './components/SidebarLayout';
 import { initErrorBusBridge } from './errors/error-bus-bridge';
 import { refreshPluginUI } from './stores/plugin-ui-actions';
 import { openSettingsModal } from './stores/settings-modal-actions';
+import { initQuotedSelectionLifecycle } from './stores/selection-actions';
 import { configureAppEventActions, handleAppEvent, readConfigCwdHistory, readConfigHomeFolder, readConfigMemoryMasterEnabled } from './services/app-event-actions';
 import { configureWsMessageHandler } from './services/ws-message-handler';
+import { applyChatLayout } from './chat/layout';
 import { applyEditorTypography } from './editor/typography';
 import {
   LOCAL_CONNECTION_ID,
@@ -28,14 +31,13 @@ import {
   hasServerConnection,
   mergeServerIdentity,
   readPersistedServerConnectionState,
+  refreshLocalServerConnectionState,
   upsertServerConnection,
   type ServerConnection,
 } from './services/server-connection';
 import { persistAppearancePreferences } from './services/appearance-sync';
-// @ts-expect-error — shared JS module
-import { errorBus as _errorBus } from '../../../shared/error-bus.js';
-// @ts-expect-error — shared JS module
-import { AppError as _AppError } from '../../../shared/errors.js';
+import { errorBus as _errorBus } from '../../../shared/error-bus.ts';
+import { AppError as _AppError } from '../../../shared/errors.ts';
 
 declare const i18n: {
   locale: string;
@@ -45,6 +47,14 @@ declare const i18n: {
 declare function t(key: string, vars?: Record<string, string | number>): string;
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- 全局 bootstrap：platform/IPC callback 签名含 any */
+
+function markRendererLaunch(event: string, details?: unknown) {
+  if (details === undefined) {
+    console.info(`[hana-launch] ${event}`);
+  } else {
+    console.info(`[hana-launch] ${event}`, details);
+  }
+}
 
 // ── __hanaLog：前端日志上报 ──
 window.__hanaLog = function (level: string, module: string, message: string) {
@@ -70,6 +80,7 @@ window.addEventListener('unhandledrejection', (e) => {
 
 export async function initApp(): Promise<void> {
   const platform = window.platform;
+  initQuotedSelectionLifecycle();
 
   const requestContextUsage = (sessionPath: string) => {
     const ws = getWebSocket();
@@ -79,6 +90,28 @@ export async function initApp(): Promise<void> {
   };
   configureAppEventActions({ requestContextUsage });
   configureWsMessageHandler({ requestContextUsage });
+
+  platform.onServerRestarted?.((data: { port: number; token?: string | null }) => {
+    const storeState = useStore.getState();
+    const serverPort = String(data.port);
+    const serverToken = data.token ?? storeState.serverToken ?? null;
+    const activeBeforeRestart = storeState.activeServerConnection;
+    const nextConnectionState = refreshLocalServerConnectionState({
+      serverConnections: storeState.serverConnections,
+      activeServerConnectionId: storeState.activeServerConnectionId,
+      activeServerConnection: storeState.activeServerConnection,
+      serverPort,
+      serverToken,
+    });
+    useStore.setState({
+      serverPort,
+      serverToken,
+      ...nextConnectionState,
+    });
+    if (!activeBeforeRestart || activeBeforeRestart.connectionId === LOCAL_CONNECTION_ID) {
+      connectWebSocket();
+    }
+  });
 
   // 1. 获取 server 连接信息并存入 Zustand
   const serverPort = await platform.getServerPort();
@@ -102,6 +135,7 @@ export async function initApp(): Promise<void> {
 
   if (!activeServerConnection) {
     setStatus('status.serverNotReady', false);
+    markRendererLaunch('app-ready', JSON.stringify({ reason: 'no-active-server-connection' }));
     platform.appReady();
     return;
   }
@@ -132,12 +166,14 @@ export async function initApp(): Promise<void> {
       } catch (localErr) {
         console.error('[init] server identity failed:', localErr);
         setStatus('status.serverNotReady', false);
+        markRendererLaunch('app-ready', JSON.stringify({ reason: 'local-server-identity-failed' }));
         platform.appReady();
         return;
       }
     } else {
       console.error('[init] server identity failed:', err);
       setStatus('status.serverNotReady', false);
+      markRendererLaunch('app-ready', JSON.stringify({ reason: 'server-identity-failed' }));
       platform.appReady();
       return;
     }
@@ -156,6 +192,7 @@ export async function initApp(): Promise<void> {
     const healthData = await healthRes.json();
     const configData = await configRes.json();
     applyEditorTypography(configData.editor);
+    applyChatLayout(configData.chat);
 
     // 3. 加载 i18n
     await i18n.load(configData.locale || 'zh-CN');
@@ -193,8 +230,14 @@ export async function initApp(): Promise<void> {
 
   // 10. 加载 agents + sessions
   useStore.setState({ pendingNewSession: true });
+  await loadPendingNewSessionPermissionDefault();
   await loadAgents();
   await loadSessions();
+
+  // 10b. 加载项目目录（带重试）。放在 sessions 之后：此时 server 已确认可用，
+  // 避免项目目录像过去那样只靠 SessionList 挂载时一次性拉取、失败即长期空白，
+  // 导致自定义项目消失、其会话被错误并入 cwd 推导分组。
+  await initSessionProjectCatalog();
 
   // 11. 初始化书桌
   initJian();
@@ -242,19 +285,21 @@ export async function initApp(): Promise<void> {
     openSettingsModal(tab);
   });
 
+  // 21. Quick Chat 请求打开后台会话：复用主窗口既有 session 切换路径
+  platform.onQuickChatOpenSession?.((payload: { sessionPath?: string }) => {
+    if (payload?.sessionPath) {
+      void switchSession(payload.sessionPath);
+      loadSessions();
+    }
+  });
+
   // 21. Skill Viewer overlay（主进程 / 设置窗口 → 渲染进程）
   window.hana?.onShowSkillViewer?.((data: any) => {
     useStore.setState({ skillViewerData: data });
   });
 
-  // 22. 系统休眠唤醒监听（防止长时间闲置后白屏）
-  window.hana?.onSystemResumed?.(() => {
-    console.log('[app-init] 系统从休眠中恢复，强制重连 WebSocket');
-    // 动态导入避免循环依赖
-    import('./services/websocket').then(({ forceReconnect }) => forceReconnect());
-  });
-
-  // 23. 通知 app ready
+  // 22. 通知 app ready
+  markRendererLaunch('app-ready');
   platform.appReady();
 }
 

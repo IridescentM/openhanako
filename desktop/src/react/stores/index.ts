@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { createConnectionSlice, type ConnectionSlice } from './connection-slice';
-import { createSessionSlice, type SessionSlice } from './session-slice';
+import { createSessionSlice, sessionScopedKey, type SessionSlice } from './session-slice';
+import { createSessionProjectSlice, type SessionProjectSlice } from './session-project-slice';
 import { createStreamingSlice, type StreamingSlice } from './streaming-slice';
 import { createUiSlice, type UiSlice } from './ui-slice';
 import { createAgentSlice, type AgentSlice } from './agent-slice';
@@ -15,15 +16,18 @@ import { createBrowserSlice, type BrowserSlice } from './browser-slice';
 import { createContextSlice, type ContextSlice } from './context-slice';
 import { createAutomationSlice, type AutomationSlice } from './automation-slice';
 import { createActivitySlice, type ActivitySlice } from './activity-slice';
+import { createAgentActivitySlice, type AgentActivitySlice } from './agent-activity-slice';
 import { createBridgeSlice, type BridgeSlice } from './bridge-slice';
 import { createPluginUiSlice, type PluginUiSlice } from './plugin-ui-slice';
 import { createSelectionSlice, type SelectionSlice } from './selection-slice';
 import { createSubagentPreviewSlice, type SubagentPreviewSlice } from './subagent-preview-slice';
 import { createComputerOverlaySlice, type ComputerOverlaySlice } from './computer-overlay-slice';
 import { createScreenshotSlice, type ScreenshotSlice } from './screenshot-slice';
+import { configureMessageLiveVersionSessionKeyResolver } from './message-live-version';
 
 export type StoreState = ConnectionSlice &
   SessionSlice &
+  SessionProjectSlice &
   StreamingSlice &
   UiSlice &
   AgentSlice &
@@ -38,6 +42,7 @@ export type StoreState = ConnectionSlice &
   ContextSlice &
   AutomationSlice &
   ActivitySlice &
+  AgentActivitySlice &
   BridgeSlice &
   PluginUiSlice &
   SelectionSlice &
@@ -48,6 +53,7 @@ export type StoreState = ConnectionSlice &
 export const useStore = create<StoreState>()((set, _get, _api) => ({
   ...createConnectionSlice(set, _get),
   ...createSessionSlice(set),
+  ...createSessionProjectSlice(set),
   ...createStreamingSlice(set, _get),
   ...createUiSlice(set),
   ...createAgentSlice(set),
@@ -62,6 +68,7 @@ export const useStore = create<StoreState>()((set, _get, _api) => ({
   ...createContextSlice(set),
   ...createAutomationSlice(set),
   ...createActivitySlice(set),
+  ...createAgentActivitySlice(set),
   ...createBridgeSlice(set),
   ...createPluginUiSlice(set),
   ...createSelectionSlice(set),
@@ -70,10 +77,15 @@ export const useStore = create<StoreState>()((set, _get, _api) => ({
   ...createScreenshotSlice(set),
 }));
 
+configureMessageLiveVersionSessionKeyResolver((sessionPath) => (
+  sessionScopedKey(useStore.getState(), sessionPath)
+));
+
 // Re-export slice types
 export type {
   ConnectionSlice,
   SessionSlice,
+  SessionProjectSlice,
   StreamingSlice,
   UiSlice,
   AgentSlice,
@@ -88,6 +100,7 @@ export type {
   ContextSlice,
   AutomationSlice,
   ActivitySlice,
+  AgentActivitySlice,
   BridgeSlice,
   PluginUiSlice,
   SelectionSlice,

@@ -1,5 +1,6 @@
-import type { DeskFile } from '../types';
+import type { DeskFile, StudioWorkspace } from '../types';
 import type { RightWorkspaceTab } from '../types';
+import type { PreviewReadingPosition } from '../../../../shared/preview-reading-position.ts';
 
 export interface CwdSkillInfo {
   name: string;
@@ -7,6 +8,7 @@ export interface CwdSkillInfo {
   source: string;
   filePath: string;
   baseDir: string;
+  workspaceMountId?: string | null;
 }
 
 export interface WorkspaceDeskState {
@@ -24,6 +26,7 @@ export interface WorkspaceDeskState {
   previewOpen: boolean;
   openTabs: string[];
   activeTabId: string | null;
+  previewReadingPositions: Record<string, PreviewReadingPosition>;
 }
 
 export interface DeskSlice {
@@ -39,6 +42,17 @@ export interface DeskSlice {
   cwdSkillsOpen: boolean;
   homeFolder: string | null;
   selectedFolder: string | null;
+  selectedWorkspaceMountId: string | null;
+  selectedWorkspaceLabel: string | null;
+  deskWorkspaceMountId: string | null;
+  deskWorkspaceLabel: string | null;
+  /**
+   * 当前 mount 工作台的 native 绝对根路径（服务端按 principal 披露）。
+   * 归属与 deskWorkspaceMountId 一致：仅在 mount 工作台激活时非空；
+   * 远端/虚拟 mount 或未披露时为 null。
+   */
+  deskWorkspaceNativeRoot: string | null;
+  studioWorkspaces: StudioWorkspace[];
   workspaceFolders: string[];
   cwdHistory: string[];
   workspaceDeskStateByRoot: Record<string, WorkspaceDeskState>;
@@ -57,6 +71,9 @@ export interface DeskSlice {
   setDeskJianContent: (content: string | null) => void;
   setHomeFolder: (folder: string | null) => void;
   setSelectedFolder: (folder: string | null) => void;
+  setSelectedWorkspaceMount: (mountId: string | null, label?: string | null) => void;
+  setDeskWorkspaceMount: (mountId: string | null, label?: string | null, nativeRoot?: string | null) => void;
+  setStudioWorkspaces: (workspaces: StudioWorkspace[]) => void;
   setWorkspaceFolders: (folders: string[]) => void;
   setCwdHistory: (history: string[]) => void;
   setWorkspaceDeskState: (root: string, state: WorkspaceDeskState) => void;
@@ -77,6 +94,12 @@ export const createDeskSlice = (
   cwdSkillsOpen: false,
   homeFolder: null,
   selectedFolder: null,
+  selectedWorkspaceMountId: null,
+  selectedWorkspaceLabel: null,
+  deskWorkspaceMountId: null,
+  deskWorkspaceLabel: null,
+  deskWorkspaceNativeRoot: null,
+  studioWorkspaces: [],
   workspaceFolders: [],
   cwdHistory: [],
   workspaceDeskStateByRoot: {},
@@ -115,6 +138,16 @@ export const createDeskSlice = (
   setDeskJianContent: (content) => set({ deskJianContent: content }),
   setHomeFolder: (folder) => set({ homeFolder: folder }),
   setSelectedFolder: (folder) => set({ selectedFolder: folder }),
+  setSelectedWorkspaceMount: (mountId, label = null) => set({
+    selectedWorkspaceMountId: mountId,
+    selectedWorkspaceLabel: label ?? null,
+  }),
+  setDeskWorkspaceMount: (mountId, label = null, nativeRoot = null) => set({
+    deskWorkspaceMountId: mountId,
+    deskWorkspaceLabel: mountId ? (label ?? null) : null,
+    deskWorkspaceNativeRoot: mountId ? (nativeRoot ?? null) : null,
+  }),
+  setStudioWorkspaces: (workspaces) => set({ studioWorkspaces: workspaces }),
   setWorkspaceFolders: (folders) => set({ workspaceFolders: folders }),
   setCwdHistory: (history) => set({ cwdHistory: history }),
   setWorkspaceDeskState: (root, state) => set((s) => ({

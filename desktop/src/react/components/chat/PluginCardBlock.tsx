@@ -1,10 +1,12 @@
-import { useState, useMemo } from 'react';
-import { hanaUrl } from '../../hooks/use-hana-fetch';
+import { useEffect, useState } from 'react';
 import { usePluginIframe } from '../../hooks/use-plugin-iframe';
+import { usePluginSurfaceUrl } from '../../hooks/use-plugin-surface-url';
 import { useStore } from '../../stores';
+import { loadMessages } from '../../stores/session-actions';
+import { sessionScopedValue } from '../../stores/session-slice';
 import type { PluginCardDetails } from '../../types';
+import { ChatMessageSurface } from './ChatMessageSurface';
 import s from './PluginCardBlock.module.css';
-import { DEFAULT_THEME } from '../../../shared/theme-registry';
 
 interface Props {
   card: PluginCardDetails;
@@ -21,7 +23,62 @@ function parseRatio(raw?: string): number {
   return (w && h) ? w / h : 0;
 }
 
-export function PluginCardBlock({ card, agentId }: Props) {
+function isIframeCard(card: PluginCardDetails): boolean {
+  return !card.type || card.type === 'iframe' || card.type === 'webview';
+}
+
+function chatSurfaceSession(card: PluginCardDetails): { sessionId: string | null; sessionPath: string | null } {
+  const sessionRef = card.sessionRef || null;
+  const sessionId = card.sessionId || sessionRef?.sessionId || null;
+  const sessionPath = card.sessionPath
+    || sessionRef?.sessionPath
+    || sessionRef?.path
+    || sessionRef?.legacySessionPath
+    || null;
+  return { sessionId, sessionPath };
+}
+
+function PluginCardFallback({ card }: { card: PluginCardDetails }) {
+  if (!card.description) return null;
+  return (
+    <div className={s.container}>
+      {card.title && <div className={s.title}>{card.title}</div>}
+      <div className={s.description}>{card.description}</div>
+    </div>
+  );
+}
+
+function PluginChatSurfaceCard({ card }: { card: PluginCardDetails }) {
+  const { sessionId, sessionPath } = chatSurfaceSession(card);
+  const hasTitle = Boolean(card.title);
+  const loaded = useStore(st => sessionPath
+    ? Boolean(sessionScopedValue(st, st.chatSessions, sessionPath))
+    : false);
+
+  useEffect(() => {
+    if (!sessionPath || loaded) return;
+    void loadMessages(sessionPath);
+  }, [loaded, sessionPath]);
+
+  if (!sessionId || !sessionPath) {
+    return <PluginCardFallback card={card} />;
+  }
+
+  return (
+    <div className={`${s.container} ${s.chatSurface}`}>
+      {hasTitle && (
+        <div className={s.chatSurfaceHeader}>
+          <div className={s.chatSurfaceTitle}>{card.title}</div>
+        </div>
+      )}
+      <div className={`${s.chatSurfaceBody}${hasTitle ? '' : ` ${s.chatSurfaceBodyFull}`}`}>
+        <ChatMessageSurface sessionPath={sessionPath} active variant="card" />
+      </div>
+    </div>
+  );
+}
+
+function PluginWebViewCard({ card, agentId }: Props) {
   const [error, setError] = useState(false);
   const capabilityGrants = useStore(st => st.pluginUiHostCapabilities[card.pluginId] ?? EMPTY_CAPABILITY_GRANTS);
 
@@ -32,17 +89,11 @@ export function PluginCardBlock({ card, agentId }: Props) {
     ? Math.min(Math.round(defaultW / ratio), MAX_H)
     : Math.round(defaultW * 0.75); // 4:3 fallback for old cards
 
-  const isIframe = !card.type || card.type === 'iframe';
+  const isIframe = isIframeCard(card);
+  const route = isIframe && card.route ? card.route : null;
 
-  const src = useMemo(() => {
-    if (!isIframe) return '';
-    const theme = document.documentElement.dataset.theme || DEFAULT_THEME;
-    const cssUrl = hanaUrl(`/api/plugins/theme.css?theme=${encodeURIComponent(theme)}`);
-    const base = hanaUrl(`/api/plugins/${card.pluginId}${card.route}`);
-    const sep = base.includes('?') ? '&' : '?';
-    return `${base}${sep}agentId=${encodeURIComponent(agentId || '')}&hana-theme=${encodeURIComponent(theme)}&hana-css=${encodeURIComponent(cssUrl)}`;
-  }, [card.pluginId, card.route, isIframe, agentId]);
-  const { iframeRef, status, size } = usePluginIframe(isIframe ? src : null, {
+  const surfaceUrl = usePluginSurfaceUrl(route ? `/api/plugins/${card.pluginId}${route}` : null, agentId);
+  const { iframeRef, status: iframeStatus, size } = usePluginIframe(isIframe ? surfaceUrl.iframeSrc : null, {
     pluginId: card.pluginId,
     agentId,
     slot: 'card',
@@ -50,16 +101,11 @@ export function PluginCardBlock({ card, agentId }: Props) {
     initialSize: { width: defaultW, height: defaultH },
     readyOnTimeout: true,
   });
+  const status = surfaceUrl.status === 'ready' ? iframeStatus : surfaceUrl.status;
   const ready = status === 'ready';
 
-  if (!isIframe || error) {
-    if (!card.description) return null;
-    return (
-      <div className={s.container}>
-        {card.title && <div className={s.title}>{card.title}</div>}
-        <div className={s.description}>{card.description}</div>
-      </div>
-    );
+  if (!isIframe || !route || error) {
+    return <PluginCardFallback card={card} />;
   }
 
   return (
@@ -67,7 +113,7 @@ export function PluginCardBlock({ card, agentId }: Props) {
       <iframe
         ref={iframeRef}
         className={s.iframe}
-        src={src}
+        src={surfaceUrl.iframeSrc || undefined}
         sandbox="allow-scripts allow-same-origin"
         style={{
           width: size.width ?? defaultW,
@@ -78,4 +124,11 @@ export function PluginCardBlock({ card, agentId }: Props) {
       />
     </div>
   );
+}
+
+export function PluginCardBlock({ card, agentId }: Props) {
+  if (card.type === 'chat.surface') {
+    return <PluginChatSurfaceCard card={card} />;
+  }
+  return <PluginWebViewCard card={card} agentId={agentId} />;
 }

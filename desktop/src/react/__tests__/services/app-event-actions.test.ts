@@ -12,6 +12,7 @@ const mockSwitchSession = vi.fn(async () => {});
 const mockLoadModels = vi.fn(async () => {});
 const mockActivateWorkspaceDesk = vi.fn(async () => {});
 const mockLoadChannels = vi.fn(async () => {});
+const mockApplyChatLayout = vi.fn();
 const mockApplyEditorTypography = vi.fn();
 
 vi.mock('../../stores', () => ({
@@ -50,6 +51,10 @@ vi.mock('../../stores/channel-actions', () => ({
   loadChannels: mockLoadChannels,
 }));
 
+vi.mock('../../chat/layout', () => ({
+  applyChatLayout: mockApplyChatLayout,
+}));
+
 vi.mock('../../editor/typography', () => ({
   applyEditorTypography: mockApplyEditorTypography,
 }));
@@ -74,6 +79,7 @@ describe('handleAppEvent', () => {
     mockLoadModels.mockReset();
     mockActivateWorkspaceDesk.mockReset();
     mockLoadChannels.mockReset();
+    mockApplyChatLayout.mockReset();
     mockApplyEditorTypography.mockReset();
     vi.resetModules();
 
@@ -158,6 +164,19 @@ describe('handleAppEvent', () => {
 
     expect(mockLoadModels).toHaveBeenCalledTimes(1);
     expect(requestContextUsage).toHaveBeenCalledWith('/session/a.jsonl');
+  });
+
+  it('skills-changed increments the skill catalog revision and emits a browser event', async () => {
+    Object.assign(mockState, { skillCatalogVersion: 2 });
+    const { handleAppEvent } = await import('../../services/app-event-actions');
+
+    handleAppEvent('skills-changed', { agentId: 'agent-a' });
+
+    expect(mockState.skillCatalogVersion).toBe(3);
+    expect((globalThis as any).window.dispatchEvent).toHaveBeenCalledTimes(1);
+    const event = ((globalThis as any).window.dispatchEvent as any).mock.calls[0][0] as CustomEvent;
+    expect(event.type).toBe('hana-skills-changed');
+    expect(event.detail).toEqual({ agentId: 'agent-a' });
   });
 
   it('agent-updated for a non-current agent refreshes the agent list without applying identity', async () => {
@@ -253,6 +272,18 @@ describe('handleAppEvent', () => {
     });
   });
 
+  it('chat-layout-changed applies chat layout settings', async () => {
+    const { handleAppEvent } = await import('../../services/app-event-actions');
+
+    handleAppEvent('chat-layout-changed', {
+      chat: { contentWidth: 800 },
+    });
+
+    expect(mockApplyChatLayout).toHaveBeenCalledWith({
+      contentWidth: 800,
+    });
+  });
+
   it('does not echo desktop IPC network proxy broadcasts back to the main process', async () => {
     const settingsChanged = vi.fn();
     (globalThis as any).window.platform = { settingsChanged };
@@ -305,7 +336,7 @@ describe('handleAppEvent', () => {
     expect(mockState.selectedFolder).toBe('/new-home');
     expect(mockState.workspaceFolders).toEqual([]);
     expect(mockState.cwdHistory).toEqual(['/old-home']);
-    expect(mockActivateWorkspaceDesk).toHaveBeenCalledWith('/new-home');
+    expect(mockActivateWorkspaceDesk).toHaveBeenCalledWith('/new-home', { mountId: null });
 
     mockActivateWorkspaceDesk.mockClear();
     handleAppEvent('agent-workspace-changed', {
@@ -318,5 +349,43 @@ describe('handleAppEvent', () => {
     expect(mockState.selectedFolder).toBe('/new-home');
     expect(mockState.cwdHistory).toEqual(['/old-home']);
     expect(mockActivateWorkspaceDesk).not.toHaveBeenCalled();
+  });
+
+  it('agent-created reloads both agents and channels so the new DM appears immediately', async () => {
+    const { handleAppEvent } = await import('../../services/app-event-actions');
+
+    handleAppEvent('agent-created', { agentId: 'agent-new' });
+
+    expect(mockLoadAgents).toHaveBeenCalledTimes(1);
+    expect(mockLoadChannels).toHaveBeenCalledTimes(1);
+  });
+
+  it('agent-deleted reloads both agents and channels so the stale DM disappears immediately', async () => {
+    Object.assign(mockState, { currentChannel: 'other-channel' });
+    const { handleAppEvent } = await import('../../services/app-event-actions');
+
+    handleAppEvent('agent-deleted', { agentId: 'agent-gone' });
+
+    expect(mockLoadAgents).toHaveBeenCalledTimes(1);
+    expect(mockLoadChannels).toHaveBeenCalledTimes(1);
+  });
+
+  it('agent-deleted clears current session state when the open DM belongs to the deleted agent', async () => {
+    Object.assign(mockState, {
+      currentChannel: 'dm:agent-gone',
+      channelMessages: [{ sender: 'agent-gone', body: 'hi', timestamp: '2026-01-01' }],
+      channelHeaderName: 'agent-gone',
+      channelHeaderMembersText: '2 members',
+      channelIsDM: true,
+    });
+    const { handleAppEvent } = await import('../../services/app-event-actions');
+
+    handleAppEvent('agent-deleted', { agentId: 'agent-gone' });
+
+    expect(mockState.currentChannel).toBeNull();
+    expect(mockState.channelMessages).toEqual([]);
+    expect(mockState.channelHeaderName).toBe('');
+    expect(mockState.channelHeaderMembersText).toBe('');
+    expect(mockState.channelIsDM).toBe(false);
   });
 });

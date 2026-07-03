@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
@@ -12,6 +12,7 @@ const switchSessionMock = vi.fn();
 const archiveSessionMock = vi.fn();
 const renameSessionMock = vi.fn();
 const pinSessionMock = vi.fn();
+const createNewSessionMock = vi.fn();
 
 vi.mock('../../hooks/use-hana-fetch', () => ({
   hanaFetch: (...args: unknown[]) => hanaFetchMock(...args),
@@ -23,6 +24,7 @@ vi.mock('../../stores/session-actions', () => ({
   archiveSession: (...args: unknown[]) => archiveSessionMock(...args),
   renameSession: (...args: unknown[]) => renameSessionMock(...args),
   pinSession: (...args: unknown[]) => pinSessionMock(...args),
+  createNewSession: (...args: unknown[]) => createNewSessionMock(...args),
 }));
 
 vi.mock('../../hooks/use-i18n', () => ({
@@ -73,8 +75,18 @@ function seedSessions() {
     pendingNewSession: false,
     agents: [],
     streamingSessions: [],
+    unreadOutputSessionPaths: [],
     browserBySession: {},
     locale: 'zh',
+  });
+}
+
+function makeSessionsToday() {
+  useStore.setState({
+    sessions: useStore.getState().sessions.map((session) => ({
+      ...session,
+      modified: new Date().toISOString(),
+    })),
   });
 }
 
@@ -84,8 +96,31 @@ function sessionButton(title: string) {
   return button;
 }
 
+function dragData() {
+  const data = new Map<string, string>();
+  return {
+    dropEffect: '',
+    effectAllowed: '',
+    setData: vi.fn((type: string, value: string) => data.set(type, value)),
+    getData: vi.fn((type: string) => data.get(type) || ''),
+    clearData: vi.fn(() => data.clear()),
+  };
+}
+
+async function openSortMenu() {
+  fireEvent.click(await screen.findByRole('button', { name: 'sidebar.view.sort' }));
+}
+
+async function switchToProjectView() {
+  await openSortMenu();
+  expect(await screen.findByText('sidebar.view.time')).toBeInTheDocument();
+  expect(await screen.findByText('sidebar.view.project')).toBeInTheDocument();
+  fireEvent.click(screen.getByText('sidebar.view.project'));
+}
+
 describe('SessionList context menu', () => {
   beforeEach(() => {
+    window.localStorage.removeItem('hana-session-sidebar-view-mode');
     globalThis.t = ((key: string) => {
       if (key === 'yuan.types') return {};
       return key;
@@ -107,6 +142,7 @@ describe('SessionList context menu', () => {
     archiveSessionMock.mockReset();
     renameSessionMock.mockReset();
     pinSessionMock.mockReset();
+    createNewSessionMock.mockReset();
     seedSessions();
   });
 
@@ -177,6 +213,44 @@ describe('SessionList context menu', () => {
     expect(archiveSessionMock).toHaveBeenCalledWith('/tmp/agents/hana/sessions/with-summary.jsonl');
   });
 
+  it('allows deleted-agent sessions to unpin and archive without exposing rename or pin', async () => {
+    useStore.setState({
+      sessions: [{
+        path: '/tmp/agents/deleted/sessions/pinned.jsonl',
+        title: 'Deleted pinned',
+        firstMessage: 'old',
+        modified: '2026-04-29T08:00:00.000Z',
+        messageCount: 2,
+        agentId: 'deleted',
+        agentName: 'Deleted',
+        cwd: '/tmp/project',
+        pinnedAt: '2026-04-29T08:10:00.000Z',
+        hasSummary: false,
+        agentDeleted: true,
+      }],
+      currentSessionPath: null,
+      pendingSessionSwitchPath: null,
+      pendingNewSession: false,
+      agents: [],
+      streamingSessions: [],
+      unreadOutputSessionPaths: [],
+      browserBySession: {},
+      locale: 'zh',
+    });
+
+    render(<SessionList />);
+
+    fireEvent.contextMenu(sessionButton('Deleted pinned'), { clientX: 24, clientY: 32 });
+    expect(screen.queryByText('session.rename')).not.toBeInTheDocument();
+    expect(screen.queryByText('session.pin')).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByText('session.unpin'));
+    expect(pinSessionMock).toHaveBeenCalledWith('/tmp/agents/deleted/sessions/pinned.jsonl', false);
+
+    fireEvent.contextMenu(sessionButton('Deleted pinned'), { clientX: 24, clientY: 32 });
+    fireEvent.click(await screen.findByText('session.archive'));
+    expect(archiveSessionMock).toHaveBeenCalledWith('/tmp/agents/deleted/sessions/pinned.jsonl');
+  });
+
   it('closes a sidebar browser badge without switching the session row', async () => {
     const browserStates = {
       '/tmp/agents/hana/sessions/with-summary.jsonl': {
@@ -213,35 +287,828 @@ describe('SessionList context menu', () => {
     });
   });
 
+  it('applies the persisted single-line row mode to regular session rows', async () => {
+    hanaFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/preferences/sidebar-ui') {
+        return jsonResponse({
+          sidebarUi: {
+            projectView: {
+              collapsedProjectIds: [],
+              collapsedFolderIds: [],
+              showAllProjectIds: [],
+            },
+            sessionList: { rowMode: 'single-line' },
+          },
+        });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+
+    const row = sessionButton('Has summary');
+    await waitFor(() => {
+      expect(row).toHaveAttribute('data-row-mode', 'single-line');
+    });
+    expect(row.querySelector('[data-session-actions]')).toBeInTheDocument();
+    expect(row).toHaveAttribute('title', expect.stringContaining('Hana'));
+  });
+
+  it('shows title search results first and then content results', async () => {
+    hanaFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url.includes('phase=title')) {
+        return jsonResponse({
+          results: [{
+            path: '/tmp/agents/hana/sessions/title-search.jsonl',
+            title: '聊天记录搜索',
+            firstMessage: 'hello',
+            modified: '2026-05-22T08:00:00.000Z',
+            messageCount: 2,
+            agentId: 'hana',
+            agentName: 'Hana',
+            cwd: '/tmp/project',
+            matchKind: 'title',
+            snippet: '',
+          }],
+        });
+      }
+      if (url.includes('phase=content')) {
+        return jsonResponse({
+          results: [{
+            path: '/tmp/agents/hana/sessions/content-search.jsonl',
+            title: '排查记录',
+            firstMessage: 'hello',
+            modified: '2026-05-22T07:00:00.000Z',
+            messageCount: 4,
+            agentId: 'hana',
+            agentName: 'Hana',
+            cwd: '/tmp/project',
+            matchKind: 'content',
+            snippet: '这里记录了和其他 Agent 的聊天记录排查。',
+          }],
+        });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+    fireEvent.change(screen.getByPlaceholderText('sidebar.searchPlaceholder'), {
+      target: { value: '聊天记录' },
+    });
+
+    expect(await screen.findByText('聊天记录搜索')).toBeInTheDocument();
+    expect(await screen.findByText(/和其他 Agent 的聊天记录/)).toBeInTheDocument();
+
+    const searchCalls = hanaFetchMock.mock.calls
+      .map(([url]) => String(url))
+      .filter(url => url.startsWith('/api/sessions/search'));
+    expect(searchCalls[0]).toContain('phase=title');
+    expect(searchCalls[1]).toContain('phase=content');
+
+    const resultButton = screen.getByText('聊天记录搜索').closest('button');
+    if (!resultButton) throw new Error('missing search result button');
+    fireEvent.click(resultButton);
+    expect(switchSessionMock).toHaveBeenCalledWith('/tmp/agents/hana/sessions/title-search.jsonl');
+  });
+
   it('uses the session meta font size for the summary body', () => {
     const css = fs.readFileSync(
       path.join(__dirname, '../../components/SessionList.module.css'),
       'utf-8',
     );
 
-    expect(css).toMatch(/\.sessionSummaryBody\s*\{[\s\S]*font-size:\s*0\.66rem/);
+    expect(css).toMatch(/\.sessionSummaryBody\s*\{[\s\S]*font-size:\s*var\(--fs-hint\)/);
     expect(css).not.toMatch(/\.sessionContextMenu/);
     expect(css).not.toMatch(/sessionItemSummaryEmpty/);
   });
 
-  it('keeps row hover-only controls behind fine pointer media queries so mobile taps switch immediately', () => {
+  it('uses one fine-hover policy for row and heading hover controls', () => {
     const css = fs.readFileSync(
       path.join(__dirname, '../../components/SessionList.module.css'),
       'utf-8',
     );
 
-    expect(css).toMatch(/@media\s*\(hover:\s*hover\)\s*and\s*\(pointer:\s*fine\)\s*\{[\s\S]*\.sessionItem:hover\s*\{/);
-    expect(css).toMatch(/@media\s*\(hover:\s*hover\)\s*and\s*\(pointer:\s*fine\)\s*\{[\s\S]*\.sessionItem:hover \.sessionArchiveBtn\s*\{/);
+    expect(css).not.toMatch(/@media\s*\(hover:\s*hover\)\s*and\s*\(pointer:\s*fine\)/);
+    expect(css).toMatch(/@media\s*\(any-hover:\s*hover\)\s*and\s*\(any-pointer:\s*fine\)\s*\{[\s\S]*\.sessionItem:hover\s*\{/);
+    expect(css).toMatch(/@media\s*\(any-hover:\s*hover\)\s*and\s*\(any-pointer:\s*fine\)\s*\{[\s\S]*\.sessionItem:not\(\.sessionItemSingleLine\):hover \.sessionArchiveBtn/);
+    expect(css).toMatch(/@media\s*\(any-hover:\s*hover\)\s*and\s*\(any-pointer:\s*fine\)\s*\{[\s\S]*\.sessionItemSingleLine:hover \.sessionItemActions\s*\{[\s\S]*width:\s*calc\(40px \+ var\(--space-4\)\)/);
+    expect(css).toMatch(/@media\s*\(any-hover:\s*hover\)\s*and\s*\(any-pointer:\s*fine\)\s*\{[\s\S]*\.sessionListScroller:hover \.sectionTitleActions/);
   });
 
-  it('shows row action controls for the active or focused session without requiring hover', () => {
+  it('keeps the mobile session search input at 16px to avoid browser auto zoom', () => {
     const css = fs.readFileSync(
       path.join(__dirname, '../../components/SessionList.module.css'),
       'utf-8',
     );
 
-    expect(css).toMatch(/\.sessionItemActive \.sessionPinBtn,\s*\.sessionItemActive \.sessionRenameBtn,\s*\.sessionItemActive \.sessionArchiveBtn/);
-    expect(css).toMatch(/\.sessionItem:focus-visible \.sessionPinBtn,\s*\.sessionItem:focus-visible \.sessionRenameBtn,\s*\.sessionItem:focus-visible \.sessionArchiveBtn/);
-    expect(css).toMatch(/\.sessionItemActive \.sessionItemMeta,\s*\.sessionItem:focus-visible \.sessionItemMeta/);
+    expect(css).toMatch(/:global\(\.mobile-desktop-root\) \.sessionSearchInput\s*\{[\s\S]*font-size:\s*16px/);
+  });
+
+  it('keeps row action controls hover-only and leaves active rows from reserving empty action space', () => {
+    const css = fs.readFileSync(
+      path.join(__dirname, '../../components/SessionList.module.css'),
+      'utf-8',
+    );
+
+    expect(css).toMatch(/\.sessionItem:not\(\.sessionItemSingleLine\):hover \.sessionPinBtn/);
+    expect(css).toMatch(/\.sessionItem:not\(\.sessionItemSingleLine\):hover \.sessionArchiveBtn/);
+    expect(css).toMatch(/\.sessionItem:not\(\.sessionItemSingleLine\):hover \.sessionItemMeta\s*\{[\s\S]*padding-right:\s*52px/);
+    expect(css).toMatch(/\.sessionItem:not\(\.sessionItemSingleLine\) \.sessionItemActions\s*\{[\s\S]*position:\s*absolute/);
+    expect(css).toMatch(/\.sessionItemSingleLine \.sessionItemActions\s*\{[\s\S]*width:\s*0/);
+    expect(css).not.toMatch(/\.sessionItemActive \.sessionPinBtn/);
+    expect(css).not.toMatch(/\.sessionItemActive \.sessionArchiveBtn/);
+    expect(css).not.toMatch(/\.sessionItemActive \.sessionItemMeta/);
+    expect(css).not.toMatch(/sessionRenameBtn/);
+  });
+
+  it('keeps rename in the context menu without rendering an inline rename button', async () => {
+    render(<SessionList />);
+
+    expect(screen.queryByTitle('session.rename')).not.toBeInTheDocument();
+
+    fireEvent.contextMenu(sessionButton('No summary'), { clientX: 24, clientY: 32 });
+    fireEvent.click(await screen.findByText('session.rename'));
+
+    expect(screen.getByDisplayValue('No summary')).toBeInTheDocument();
+  });
+
+  it('renders unread output and running status as row-level status signals', async () => {
+    useStore.setState({
+      currentSessionPath: '/tmp/agents/hana/sessions/no-summary.jsonl',
+      streamingSessions: ['/tmp/agents/hana/sessions/with-summary.jsonl'],
+      unreadOutputSessionPaths: ['/tmp/agents/hana/sessions/with-summary.jsonl'],
+    } as never);
+
+    render(<SessionList />);
+
+    const row = sessionButton('Has summary');
+    expect(row).toHaveAttribute('data-unread-output', 'true');
+    const dot = row.querySelector('[data-session-status-dot]');
+    expect(dot).toBeInTheDocument();
+    expect(dot).toHaveAttribute('data-state', 'running');
+  });
+
+  it('marks the pending switch row immediately without changing the committed session path', () => {
+    useStore.setState({
+      currentSessionPath: '/tmp/agents/hana/sessions/no-summary.jsonl',
+      pendingSessionSwitchPath: '/tmp/agents/hana/sessions/with-summary.jsonl',
+      streamingSessions: [],
+      unreadOutputSessionPaths: [],
+    } as never);
+
+    render(<SessionList />);
+
+    const pendingRow = sessionButton('Has summary');
+    expect(pendingRow).toHaveAttribute('data-switch-pending', 'true');
+    const dot = pendingRow.querySelector('[data-session-status-dot]');
+    expect(dot).toBeInTheDocument();
+    expect(dot).toHaveAttribute('data-state', 'pending');
+
+    const currentRow = sessionButton('No summary');
+    expect(currentRow).toHaveAttribute('data-switch-pending', 'false');
+  });
+
+  it('keeps the status dot after a background session finishes until the user opens it', () => {
+    useStore.setState({
+      currentSessionPath: '/tmp/agents/hana/sessions/no-summary.jsonl',
+      streamingSessions: [],
+      unreadOutputSessionPaths: ['/tmp/agents/hana/sessions/with-summary.jsonl'],
+    } as never);
+
+    render(<SessionList />);
+
+    const row = sessionButton('Has summary');
+    const dot = row.querySelector('[data-session-status-dot]');
+    expect(dot).toBeInTheDocument();
+    expect(dot).toHaveAttribute('data-state', 'unread');
+  });
+
+  it('does not reference removed session row status affordances', () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, '../../components/SessionList.tsx'),
+      'utf-8',
+    );
+
+    expect(source).not.toContain('sessionItemHeaderWithStatus');
+    expect(source).not.toContain('sessionStreamingRing');
+    const css = fs.readFileSync(
+      path.join(__dirname, '../../components/SessionList.module.css'),
+      'utf-8',
+    );
+    expect(css).not.toContain('sessionItemUnreadOutput');
+    expect(css).not.toContain('sessionStreamingRing');
+  });
+
+  it('reveals section heading actions on focus without depending on hover media queries', () => {
+    const css = fs.readFileSync(
+      path.join(__dirname, '../../components/SessionList.module.css'),
+      'utf-8',
+    );
+
+    expect(css).toMatch(/\.sessionSectionTitle:focus-within \.sectionTitleActions\s*\{[\s\S]*opacity:\s*1/);
+  });
+
+  it('switches views through one Codex-like sort menu on the section heading', async () => {
+    makeSessionsToday();
+    hanaFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({ catalog: { folders: [], projects: [] } });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+
+    await openSortMenu();
+    expect(await screen.findByText('sidebar.view.time')).toBeInTheDocument();
+    expect(await screen.findByText('sidebar.view.project')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('sidebar.view.project'));
+
+    expect(await screen.findByText('sidebar.projects.title')).toBeInTheDocument();
+    expect(await screen.findByText('project')).toBeInTheDocument();
+
+    await openSortMenu();
+    expect(await screen.findByText('sidebar.view.time')).toBeInTheDocument();
+    expect(await screen.findByText('sidebar.view.project')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('sidebar.view.time'));
+    expect(await screen.findByText('time.today')).toBeInTheDocument();
+  });
+
+  it('keeps the sort menu on an empty today heading when today has no sessions', async () => {
+    hanaFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({ catalog: { folders: [], projects: [] } });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+
+    expect(await screen.findByText('time.today')).toBeInTheDocument();
+    await switchToProjectView();
+    expect(await screen.findByText('sidebar.projects.title')).toBeInTheDocument();
+  });
+
+  it('creates a project directly through the project heading button', async () => {
+    makeSessionsToday();
+    hanaFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({ catalog: { folders: [], projects: [] } });
+      }
+      if (url === '/api/session-projects/projects' && init?.method === 'POST') {
+        return jsonResponse({ ok: true, project: { id: 'project-created', name: 'Created Project', folderId: null, order: 0 } });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+    await switchToProjectView();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'sidebar.projects.create' }));
+    fireEvent.change(await screen.findByPlaceholderText('sidebar.projects.newProjectPrompt'), {
+      target: { value: 'Created Project' },
+    });
+    fireEvent.click(screen.getByText('sidebar.projects.createAction'));
+
+    await waitFor(() => {
+      expect(hanaFetchMock).toHaveBeenCalledWith('/api/session-projects/projects', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ name: 'Created Project', folderId: null }),
+      }));
+    });
+    expect(await screen.findByText('Created Project')).toBeInTheDocument();
+    expect(screen.queryByText('sidebar.projects.newFolder')).not.toBeInTheDocument();
+  });
+
+  it('renames a project from the project row context menu', async () => {
+    makeSessionsToday();
+    hanaFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({
+          catalog: {
+            folders: [],
+            projects: [{ id: 'project-root', name: 'Root Project', folderId: null, order: 0 }],
+          },
+        });
+      }
+      if (url === '/api/session-projects/projects/project-root' && init?.method === 'PATCH') {
+        return jsonResponse({ ok: true, project: { id: 'project-root', name: 'Renamed Project', folderId: null, order: 0 } });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+    await switchToProjectView();
+
+    fireEvent.contextMenu(await screen.findByText('Root Project'), { clientX: 20, clientY: 20 });
+    fireEvent.click(await screen.findByText('sidebar.projects.renameProject'));
+    fireEvent.change(await screen.findByDisplayValue('Root Project'), {
+      target: { value: 'Renamed Project' },
+    });
+    fireEvent.click(screen.getByText('sidebar.projects.save'));
+
+    await waitFor(() => {
+      expect(hanaFetchMock).toHaveBeenCalledWith('/api/session-projects/projects/project-root', expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ name: 'Renamed Project' }),
+      }));
+    });
+    expect(await screen.findByText('Renamed Project')).toBeInTheDocument();
+  });
+
+  it('deletes a project and moves its visible sessions to uncategorized', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValueOnce(true);
+    useStore.setState({
+      sessions: [{
+        path: '/tmp/agents/hana/sessions/project-1.jsonl',
+        title: 'Project item 1',
+        firstMessage: 'hello',
+        modified: new Date().toISOString(),
+        messageCount: 1,
+        agentId: 'hana',
+        agentName: 'Hana',
+        cwd: '/tmp/project',
+        projectId: 'project-root',
+        pinnedAt: null,
+        hasSummary: false,
+      }],
+    });
+    hanaFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({
+          catalog: {
+            folders: [],
+            projects: [{ id: 'project-root', name: 'Root Project', folderId: null, order: 0 }],
+          },
+        });
+      }
+      if (url === '/api/session-projects/projects/project-root' && init?.method === 'DELETE') {
+        return jsonResponse({
+          ok: true,
+          catalog: { folders: [], projects: [] },
+          assignment: { projectId: 'cwd:', sessionPaths: ['/tmp/agents/hana/sessions/project-1.jsonl'] },
+        });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+    await switchToProjectView();
+
+    fireEvent.contextMenu(await screen.findByText('Root Project'), { clientX: 20, clientY: 20 });
+    fireEvent.click(await screen.findByText('sidebar.projects.deleteProject'));
+
+    await waitFor(() => {
+      expect(hanaFetchMock).toHaveBeenCalledWith('/api/session-projects/projects/project-root', expect.objectContaining({
+        method: 'DELETE',
+      }));
+      expect(useStore.getState().sessions[0].projectId).toBe('cwd:');
+    });
+    expect(await screen.findByText('未归类')).toBeInTheDocument();
+  });
+
+  it('starts a new session draft inside the selected project from the hover action', async () => {
+    useStore.setState({
+      sessions: [{
+        path: '/tmp/agents/hana/sessions/project-1.jsonl',
+        title: 'Project item 1',
+        firstMessage: 'hello',
+        modified: new Date().toISOString(),
+        messageCount: 1,
+        agentId: 'hana',
+        agentName: 'Hana',
+        cwd: '/tmp/project',
+        projectId: 'project-root',
+        pinnedAt: null,
+        hasSummary: false,
+      }],
+    });
+    hanaFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({
+          catalog: {
+            folders: [],
+            projects: [{ id: 'project-root', name: 'Root Project', folderId: null, order: 0 }],
+          },
+        });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+    await switchToProjectView();
+
+    const projectRow = (await screen.findByText('Root Project')).closest('[role="button"]');
+    if (!projectRow) throw new Error('missing project row');
+    const newChatButton = within(projectRow as HTMLElement).getByTitle('sidebar.projects.newChatInProject');
+    fireEvent.click(newChatButton);
+
+    await waitFor(() => {
+      expect(createNewSessionMock).toHaveBeenCalledWith({ projectId: 'project-root', cwd: null });
+    });
+  });
+
+  it('starts a new session draft inside a cwd project by carrying only cwd', async () => {
+    useStore.setState({
+      sessions: [{
+        path: '/tmp/agents/hana/sessions/cwd-project.jsonl',
+        title: 'Cwd project item',
+        firstMessage: 'hello',
+        modified: new Date().toISOString(),
+        messageCount: 1,
+        agentId: 'hana',
+        agentName: 'Hana',
+        cwd: '/tmp/project',
+        projectId: null,
+        pinnedAt: null,
+        hasSummary: false,
+      }],
+    });
+    hanaFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({ catalog: { folders: [], projects: [] } });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+    await switchToProjectView();
+
+    const projectRow = (await screen.findByText('project')).closest('[role="button"]');
+    if (!projectRow) throw new Error('missing cwd project row');
+    const newChatButton = within(projectRow as HTMLElement).getByTitle('sidebar.projects.newChatInProject');
+    fireEvent.click(newChatButton);
+
+    await waitFor(() => {
+      expect(createNewSessionMock).toHaveBeenCalledWith({ cwd: '/tmp/project' });
+    });
+  });
+
+  it('shows five project sessions by default and persists the show-all expansion', async () => {
+    useStore.setState({
+      sessions: Array.from({ length: 6 }, (_, index) => ({
+        path: `/tmp/agents/hana/sessions/project-${index + 1}.jsonl`,
+        title: `Project item ${index + 1}`,
+        firstMessage: 'hello',
+        modified: new Date(Date.now() - index * 1000).toISOString(),
+        messageCount: 1,
+        agentId: 'hana',
+        agentName: 'Hana',
+        cwd: '/tmp/project',
+        projectId: 'project-root',
+        pinnedAt: null,
+        hasSummary: false,
+      })),
+    });
+    hanaFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({
+          catalog: {
+            folders: [],
+            projects: [{ id: 'project-root', name: 'Root Project', folderId: null, order: 0 }],
+          },
+        });
+      }
+      if (url === '/api/preferences/sidebar-ui') {
+        return jsonResponse({ sidebarUi: { projectView: { collapsedProjectIds: [], collapsedFolderIds: [], showAllProjectIds: [] } } });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+    await switchToProjectView();
+
+    await waitFor(() => {
+      expect(screen.getByText('Project item 5')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Project item 6')).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByText('sidebar.projects.showMore'));
+    await waitFor(() => {
+      expect(screen.getByText('Project item 6')).toBeInTheDocument();
+      expect(hanaFetchMock).toHaveBeenCalledWith('/api/preferences/sidebar-ui', expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({
+          projectView: {
+            collapsedProjectIds: [],
+            collapsedFolderIds: [],
+            showAllProjectIds: ['project-root'],
+          },
+        }),
+      }));
+    });
+  });
+
+  it('persists project row collapse state through sidebar UI preferences', async () => {
+    useStore.setState({
+      sessions: [
+        {
+          path: '/tmp/agents/hana/sessions/project-1.jsonl',
+          title: 'Project item 1',
+          firstMessage: 'hello',
+          modified: new Date().toISOString(),
+          messageCount: 1,
+          agentId: 'hana',
+          agentName: 'Hana',
+          cwd: '/tmp/project',
+          projectId: 'project-root',
+          pinnedAt: null,
+          hasSummary: false,
+        },
+      ],
+    });
+    hanaFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({
+          catalog: {
+            folders: [],
+            projects: [{ id: 'project-root', name: 'Root Project', folderId: null, order: 0 }],
+          },
+        });
+      }
+      if (url === '/api/preferences/sidebar-ui' && !init) {
+        return jsonResponse({ sidebarUi: { projectView: { collapsedProjectIds: ['project-root'], collapsedFolderIds: [], showAllProjectIds: [] } } });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+    await switchToProjectView();
+
+    expect(await screen.findByText('Root Project')).toBeInTheDocument();
+    // 折叠状态通过 Collapse 组件的 AnimatePresence 退场控制。
+    // jsdom 下退场动画可能延迟完成，用 waitFor 等待内容消失。
+    await waitFor(() => {
+      expect(screen.queryByText('Project item 1')).not.toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('Root Project'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Project item 1')).toBeInTheDocument();
+      expect(hanaFetchMock).toHaveBeenCalledWith('/api/preferences/sidebar-ui', expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({
+          projectView: {
+            collapsedProjectIds: [],
+            collapsedFolderIds: [],
+            showAllProjectIds: [],
+          },
+        }),
+      }));
+    });
+  });
+
+  it('renders catalog folders and persists folder row expansion state', async () => {
+    useStore.setState({
+      sessions: [
+        {
+          path: '/tmp/agents/hana/sessions/project-1.jsonl',
+          title: 'Folder child session',
+          firstMessage: 'hello',
+          modified: new Date().toISOString(),
+          messageCount: 1,
+          agentId: 'hana',
+          agentName: 'Hana',
+          cwd: '/tmp/project',
+          projectId: 'project-child',
+          pinnedAt: null,
+          hasSummary: false,
+        },
+      ],
+    });
+    hanaFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({
+          catalog: {
+            folders: [{ id: 'folder-work', name: 'Work Folder', order: 0 }],
+            projects: [{ id: 'project-child', name: 'Child Project', folderId: 'folder-work', order: 0 }],
+          },
+        });
+      }
+      if (url === '/api/preferences/sidebar-ui' && !init) {
+        return jsonResponse({ sidebarUi: { projectView: { collapsedProjectIds: [], collapsedFolderIds: ['folder-work'], showAllProjectIds: [] } } });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+    await switchToProjectView();
+
+    expect(await screen.findByText('Work Folder')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText('Child Project')).not.toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('Work Folder'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Child Project')).toBeInTheDocument();
+      expect(hanaFetchMock).toHaveBeenCalledWith('/api/preferences/sidebar-ui', expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({
+          projectView: {
+            collapsedProjectIds: [],
+            collapsedFolderIds: [],
+            showAllProjectIds: [],
+          },
+        }),
+      }));
+    });
+  });
+
+  it('assigns a session when dragged onto a project row', async () => {
+    makeSessionsToday();
+    hanaFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({
+          catalog: {
+            folders: [],
+            projects: [{ id: 'project-custom', name: 'Custom Project', folderId: null, order: 0 }],
+          },
+        });
+      }
+      if (url === '/api/session-projects/session-assignment' && init?.method === 'POST') {
+        return jsonResponse({ ok: true, assignment: JSON.parse(String(init.body)) });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+    await switchToProjectView();
+
+    const dataTransfer = dragData();
+    fireEvent.dragStart(sessionButton('Has summary'), { dataTransfer });
+    fireEvent.dragOver(await screen.findByText('Custom Project'), { dataTransfer });
+    fireEvent.drop(await screen.findByText('Custom Project'), { dataTransfer });
+
+    await waitFor(() => {
+      expect(hanaFetchMock).toHaveBeenCalledWith('/api/session-projects/session-assignment', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          sessionPath: '/tmp/agents/hana/sessions/with-summary.jsonl',
+          projectId: 'project-custom',
+        }),
+      }));
+    });
+  });
+
+  it('reorders projects when a project is dragged onto another project at the same level', async () => {
+    makeSessionsToday();
+    hanaFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({
+          catalog: {
+            folders: [],
+            projects: [
+              { id: 'project-first', name: 'First Project', folderId: null, order: 0 },
+              { id: 'project-second', name: 'Second Project', folderId: null, order: 1 },
+            ],
+          },
+        });
+      }
+      if (url === '/api/session-projects/projects/reorder' && init?.method === 'POST') {
+        return jsonResponse({
+          ok: true,
+          catalog: {
+            folders: [],
+            projects: [
+              { id: 'project-second', name: 'Second Project', folderId: null, order: 0 },
+              { id: 'project-first', name: 'First Project', folderId: null, order: 1 },
+            ],
+          },
+        });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+    await switchToProjectView();
+
+    const dataTransfer = dragData();
+    fireEvent.dragStart(await screen.findByText('Second Project'), { dataTransfer });
+    fireEvent.dragOver(await screen.findByText('First Project'), { dataTransfer });
+    fireEvent.drop(await screen.findByText('First Project'), { dataTransfer });
+
+    await waitFor(() => {
+      expect(hanaFetchMock).toHaveBeenCalledWith('/api/session-projects/projects/reorder', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ folderId: null, projectIds: ['project-second', 'project-first', 'cwd:%2Ftmp%2Fproject'] }),
+      }));
+    });
+  });
+
+  it('materializes cwd projects before reordering them by drag', async () => {
+    useStore.setState({
+      sessions: [
+        {
+          path: '/tmp/agents/hana/sessions/alpha.jsonl',
+          title: 'Alpha session',
+          firstMessage: 'hello',
+          modified: new Date(Date.now() - 1000).toISOString(),
+          messageCount: 1,
+          agentId: 'hana',
+          agentName: 'Hana',
+          cwd: '/tmp/alpha-project',
+          pinnedAt: null,
+          hasSummary: false,
+        },
+        {
+          path: '/tmp/agents/hana/sessions/beta.jsonl',
+          title: 'Beta session',
+          firstMessage: 'hello',
+          modified: new Date().toISOString(),
+          messageCount: 1,
+          agentId: 'hana',
+          agentName: 'Hana',
+          cwd: '/tmp/beta-project',
+          pinnedAt: null,
+          hasSummary: false,
+        },
+      ],
+    });
+    const alphaId = 'cwd:%2Ftmp%2Falpha-project';
+    const betaId = 'cwd:%2Ftmp%2Fbeta-project';
+    makeSessionsToday();
+    hanaFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/browser/session-states') return jsonResponse({});
+      if (url === '/api/session-projects') {
+        return jsonResponse({ catalog: { folders: [], projects: [] } });
+      }
+      if (url.startsWith('/api/session-projects/projects/cwd%3A') && init?.method === 'PATCH') {
+        const id = decodeURIComponent(url.slice('/api/session-projects/projects/'.length));
+        const name = JSON.parse(String(init.body)).name;
+        return jsonResponse({ ok: true, project: { id, name, folderId: null, order: 0 } });
+      }
+      if (url === '/api/session-projects/projects/reorder' && init?.method === 'POST') {
+        return jsonResponse({
+          ok: true,
+          catalog: {
+            folders: [],
+            projects: [
+              { id: alphaId, name: 'alpha-project', folderId: null, order: 0 },
+              { id: betaId, name: 'beta-project', folderId: null, order: 1 },
+            ],
+          },
+        });
+      }
+      return jsonResponse({});
+    });
+
+    render(<SessionList />);
+    await switchToProjectView();
+
+    const dataTransfer = dragData();
+    fireEvent.dragStart(await screen.findByText('alpha-project'), { dataTransfer });
+    fireEvent.dragOver(await screen.findByText('beta-project'), { dataTransfer });
+    fireEvent.drop(await screen.findByText('beta-project'), { dataTransfer });
+
+    await waitFor(() => {
+      expect(hanaFetchMock).toHaveBeenCalledWith(`/api/session-projects/projects/${encodeURIComponent(alphaId)}`, expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ name: 'alpha-project', folderId: null }),
+      }));
+      expect(hanaFetchMock).toHaveBeenCalledWith(`/api/session-projects/projects/${encodeURIComponent(betaId)}`, expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ name: 'beta-project', folderId: null }),
+      }));
+      expect(hanaFetchMock).toHaveBeenCalledWith('/api/session-projects/projects/reorder', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ folderId: null, projectIds: [alphaId, betaId] }),
+      }));
+    });
+  });
+
+  it('keeps project-view session rows unindented because their two-line shape already separates them', () => {
+    const css = fs.readFileSync(
+      path.join(__dirname, '../../components/SessionList.module.css'),
+      'utf-8',
+    );
+
+    expect(css).toMatch(/\.projectSessionList\s*\{[\s\S]*padding-left:\s*0/);
+    expect(css).not.toMatch(/\.projectSessionList\s*\{[\s\S]*margin-left:/);
+  });
+
+  it('keeps the pinned heading font unified with date and project headings', () => {
+    const css = fs.readFileSync(
+      path.join(__dirname, '../../components/SessionList.module.css'),
+      'utf-8',
+    );
+
+    const baseTitleRule = css.match(/\.sessionSectionTitle\s*\{[^}]*\}/)?.[0] || '';
+    const pinnedTitleRule = css.match(/\.pinnedSection \.sessionSectionTitle\s*\{[^}]*\}/)?.[0] || '';
+    expect(baseTitleRule).toContain('font-size: var(--fs-ui)');
+    expect(pinnedTitleRule).not.toContain('font-size:');
   });
 });

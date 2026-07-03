@@ -143,7 +143,7 @@ function normalizeBaseUrl(value: string): string {
   parsed.hash = '';
   parsed.search = '';
   const pathname = parsed.pathname.replace(/\/+$/, '');
-  parsed.pathname = pathname === '/mobile' ? '/' : pathname || '/';
+  parsed.pathname = pathname === '/mobile' || pathname === '/desktop' ? '/' : pathname || '/';
   return trimTrailingSlash(parsed.toString());
 }
 
@@ -364,6 +364,48 @@ export function refreshLocalServerConnection({
   };
 }
 
+export function refreshLocalServerConnectionState({
+  serverConnections,
+  activeServerConnectionId,
+  activeServerConnection,
+  serverPort,
+  serverToken,
+}: ServerConnectionSource): {
+  serverConnections: ServerConnectionRegistry;
+  activeServerConnectionId: string | null;
+  activeServerConnection: ServerConnection | null;
+} {
+  const existingRegistry = { ...(serverConnections ?? {}) };
+  if (activeServerConnection?.connectionId && !existingRegistry[activeServerConnection.connectionId]) {
+    existingRegistry[activeServerConnection.connectionId] = activeServerConnection;
+  }
+  const existingLocal = existingRegistry[LOCAL_CONNECTION_ID]
+    ?? (activeServerConnection?.connectionId === LOCAL_CONNECTION_ID ? activeServerConnection : null);
+  const localConnection = refreshLocalServerConnection({
+    existingConnection: existingLocal,
+    serverPort,
+    serverToken,
+  });
+  let nextRegistry = existingRegistry;
+  if (localConnection) {
+    nextRegistry = upsertServerConnection(nextRegistry, localConnection);
+  } else if (nextRegistry[LOCAL_CONNECTION_ID]) {
+    nextRegistry = { ...nextRegistry };
+    delete nextRegistry[LOCAL_CONNECTION_ID];
+  }
+
+  const preferredActive = activeServerConnectionId ? nextRegistry[activeServerConnectionId] : null;
+  const fallbackActive = activeServerConnection?.connectionId
+    ? nextRegistry[activeServerConnection.connectionId]
+    : null;
+  const nextActive = preferredActive || fallbackActive || localConnection || null;
+  return {
+    serverConnections: nextRegistry,
+    activeServerConnectionId: nextActive?.connectionId ?? null,
+    activeServerConnection: nextActive,
+  };
+}
+
 function normalizeBrowserConnectionKind(
   value: StudioConnectionKind | string | null | undefined,
   hostname: string,
@@ -417,10 +459,7 @@ function normalizeBrowserCapabilities(
 ): string[] {
   const out = new Set(identityCapabilities?.length ? identityCapabilities : LOCAL_CAPABILITIES);
   for (const scope of scopes || []) {
-    if (scope === 'chat') out.add('chat');
-    else if (scope === 'resources' || scope.startsWith('resources.')) out.add('resources');
-    else if (scope === 'files' || scope.startsWith('files.')) out.add('files');
-    else if (scope === 'tools' || scope.startsWith('tools.')) out.add('tools');
+    addScopeCapability(out, scope);
   }
   return [...out];
 }
@@ -431,13 +470,19 @@ function normalizeRemoteCapabilities(identityCapabilities: string[] | null | und
   }
   const out = new Set<string>();
   for (const capability of identityCapabilities) {
-    if (capability === 'chat') out.add('chat');
-    else if (capability === 'resources' || capability.startsWith('resources.')) out.add('resources');
-    else if (capability === 'files' || capability.startsWith('files.')) out.add('files');
-    else if (capability === 'tools' || capability.startsWith('tools.')) out.add('tools');
-    else if (capability === 'settings' || capability.startsWith('settings.')) out.add('settings');
+    addScopeCapability(out, capability);
   }
   return out.size > 0 ? [...out] : [...REMOTE_FALLBACK_CAPABILITIES];
+}
+
+function addScopeCapability(out: Set<string>, capability: string): void {
+  if (!capability) return;
+  out.add(capability);
+  if (capability === 'chat') out.add('chat');
+  else if (capability === 'resources' || capability.startsWith('resources.')) out.add('resources');
+  else if (capability === 'files' || capability.startsWith('files.')) out.add('files');
+  else if (capability === 'tools' || capability.startsWith('tools.')) out.add('tools');
+  else if (capability === 'settings' || capability.startsWith('settings.')) out.add('settings');
 }
 
 function isLoopbackHost(hostname: string): boolean {
@@ -468,6 +513,10 @@ export function requireServerConnection(
 
 export function hasServerConnection(source: ServerConnectionSource): boolean {
   return !!resolveServerConnection(source);
+}
+
+export function isLocalOwnerConnection(connection: ServerConnection | null | undefined): boolean {
+  return connection?.kind === 'local' && connection.credentialKind === 'loopback_token';
 }
 
 export function upsertServerConnection(
@@ -592,11 +641,57 @@ export function buildConnectionUrl(
 export function buildConnectionWsUrl(
   connection: ServerConnection,
   path = '/ws',
+  opts: { wsTicket?: string | null } = {},
 ): string {
   assertRoutePath(path);
   const url = `${trimTrailingSlash(connection.wsUrl)}${path}`;
+  if (opts.wsTicket) return appendQueryParam(url, 'wsTicket', opts.wsTicket);
   if (!connection.token || !canUseQueryToken(connection)) return url;
   return appendQueryParam(url, 'token', connection.token);
+}
+
+export async function requestConnectionWsTicket(
+  connection: ServerConnection,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string | null> {
+  if (canUseQueryToken(connection)) return null;
+  const res = await fetchImpl(buildConnectionUrl(connection, '/api/ws-ticket'), {
+    method: 'POST',
+    headers: appendConnectionAuth(connection, { 'Content-Type': 'application/json' }),
+    credentials: 'include',
+  });
+  if (!res.ok) {
+    throw new Error(`websocket ticket request failed: ${res.status} ${res.statusText}`);
+  }
+  const body = await res.json();
+  return typeof body?.ticket === 'string' && body.ticket.trim() ? body.ticket : null;
+}
+
+function originOf(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:' && url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+      return null;
+    }
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return null;
+  }
+}
+
+export function buildScopedConnectSources(connection: ServerConnection | null | undefined): string[] {
+  if (!connection || connection.kind === 'local') return [];
+  const out = new Set<string>();
+  const baseOrigin = originOf(connection.baseUrl);
+  const wsOrigin = originOf(connection.wsUrl);
+  if (baseOrigin) out.add(baseOrigin);
+  if (wsOrigin) out.add(wsOrigin);
+  if (baseOrigin && !wsOrigin) {
+    const base = new URL(baseOrigin);
+    out.add(`${base.protocol === 'https:' ? 'wss:' : 'ws:'}//${base.host}`);
+  }
+  return [...out];
 }
 
 export function appendConnectionAuth(

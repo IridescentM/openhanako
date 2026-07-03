@@ -20,7 +20,7 @@
  */
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 // ─── Mocks (hoisted) ──────────────────────────────────────────────────────────
 
@@ -125,16 +125,6 @@ vi.mock('../skills/SkillCapabilities', () => ({
 vi.mock('../skills/CompatPathDrawer', () => ({
   CompatPathDrawer: () => <div data-testid="compat-path-drawer" />,
 }));
-vi.mock('../skills/LearnedSkillsBlock', () => ({
-  LearnedSkillsBlock: ({
-    learnedSkills,
-  }: {
-    learnedSkills: Array<{ name: string }>;
-  }) => (
-    <div data-testid="learned-skills-block" data-count={learnedSkills.length} />
-  ),
-}));
-
 // ─── Real imports (after mocks so the mocked modules win) ─────────────────────
 
 import { SkillsTab } from '../SkillsTab';
@@ -256,6 +246,54 @@ describe('SkillsTab — sticky skillsViewAgentId & toggleSkill race guard', () =
     );
     expect(skillsCalls.length).toBeGreaterThanOrEqual(1);
     expect(skillsCalls[0][0]).toContain('agentId=agent-a');
+    expect(skillsCalls[0][0]).toContain('runtime=1');
+  });
+
+  it('uploads a selected skill package when no local path picker is available', async () => {
+    seedStore({ currentAgentId: 'agent-a' });
+    fetchMock.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url.includes('/api/skills/install')) {
+        expect(opts).toMatchObject({ method: 'POST' });
+        return Promise.resolve(jsonResponse({ ok: true, skill: { name: 'uploaded-skill' } }));
+      }
+      if (url.includes('/api/skills/external-paths')) {
+        return Promise.resolve(jsonResponse({ configured: [], discovered: [] }));
+      }
+      if (url.includes('/api/skills/bundles')) {
+        return Promise.resolve(jsonResponse({ bundles: [] }));
+      }
+      if (url.includes('/api/skills?agentId=agent-a')) {
+        return Promise.resolve(jsonResponse({ skills: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const { container } = render(<SkillsTab />);
+    await flushMicrotasks();
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement | null;
+    expect(input).toBeTruthy();
+    const file = new File(['fake zip'], 'uploaded-skill.zip', { type: 'application/zip' });
+    fireEvent.change(input!, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some((call) =>
+        typeof call[0] === 'string' && call[0].includes('/api/skills/install'))).toBe(true);
+    });
+    await flushMicrotasks(6);
+
+    const installCall = fetchMock.mock.calls.find((call) =>
+      typeof call[0] === 'string' && call[0].includes('/api/skills/install'));
+    expect(installCall).toBeTruthy();
+    const body = JSON.parse(String((installCall?.[1] as RequestInit).body || '{}'));
+    expect(body).toMatchObject({
+      file: {
+        filename: 'uploaded-skill.zip',
+      },
+    });
+    expect(typeof body.file.contentBase64).toBe('string');
+    expect(body.file.contentBase64.length).toBeGreaterThan(0);
+    expect(body.path).toBeUndefined();
   });
 
   // ── Test 2: sticky — external currentAgentId change does NOT resync ─────────
@@ -367,6 +405,46 @@ describe('SkillsTab — sticky skillsViewAgentId & toggleSkill race guard', () =
       names: ['literary-craft', 'quiet-musing'],
       lang: 'zh',
     });
+  });
+
+  it('does not render a separate learned-skills section and refreshes from the shared skills-changed event', async () => {
+    seedStore({ currentAgentId: 'agent-a' });
+    let skillName = 'writer';
+
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('/api/skills/external-paths')) {
+        return Promise.resolve(jsonResponse({ configured: [], discovered: [] }));
+      }
+      if (url.includes('/api/skills/bundles')) {
+        return Promise.resolve(jsonResponse({ bundles: [] }));
+      }
+      if (url.includes('/api/skills?agentId=agent-a')) {
+        return Promise.resolve(jsonResponse({
+          skills: [{ name: skillName, enabled: true, source: 'user' }],
+        }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<SkillsTab />);
+    await flushMicrotasks(6);
+
+    expect(screen.queryByTestId('learned-skills-block')).toBeNull();
+    expect(document.querySelector('[data-skill-name="writer"]')).toBeTruthy();
+    fetchMock.mockClear();
+
+    skillName = 'reflected-workflow';
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('hana-skills-changed', {
+        detail: { agentId: 'agent-a' },
+      }));
+    });
+    await flushMicrotasks(6);
+
+    expect(document.querySelector('[data-skill-name="reflected-workflow"]')).toBeTruthy();
+    expect(fetchMock.mock.calls.some(
+      (c) => typeof c[0] === 'string' && c[0].includes('/api/skills?agentId=agent-a'),
+    )).toBe(true);
   });
 
   // ── Test 4: toggleSkill race guard — stale write result must not refresh UI ─
@@ -681,11 +759,11 @@ describe('SkillsTab — sticky skillsViewAgentId & toggleSkill race guard', () =
     render(<SkillsTab />);
     await flushMicrotasks(6);
 
-    fireEvent.click(screen.getByRole('button', { name: '新建 Skill Bundle' }));
+    fireEvent.click(screen.getByRole('button', { name: 'settings.skills.createBundleAriaLabel' }));
     expect(promptSpy).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog', { name: '新建 Bundle' })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('Bundle 名字'), { target: { value: 'Research Bundle' } });
-    fireEvent.click(screen.getByRole('button', { name: '创建' }));
+    expect(screen.getByRole('dialog', { name: 'settings.skills.bundleDialog.createTitle' })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('settings.skills.bundleDialog.bundleNameLabel'), { target: { value: 'Research Bundle' } });
+    fireEvent.click(screen.getByRole('button', { name: 'settings.skills.bundleDialog.createBtn' }));
     await flushMicrotasks(6);
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/skills/bundles?agentId=agent-a'),
@@ -695,10 +773,10 @@ describe('SkillsTab — sticky skillsViewAgentId & toggleSkill race guard', () =
       }),
     );
 
-    fireEvent.click(screen.getByRole('button', { name: '重命名 Writing Bundle' }));
-    expect(screen.getByRole('dialog', { name: '重命名 Bundle' })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('Bundle 名字'), { target: { value: 'Writing Pack' } });
-    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    fireEvent.click(screen.getByRole('button', { name: 'settings.skills.renameBundleAriaLabel' }));
+    expect(screen.getByRole('dialog', { name: 'settings.skills.bundleDialog.renameTitle' })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('settings.skills.bundleDialog.bundleNameLabel'), { target: { value: 'Writing Pack' } });
+    fireEvent.click(screen.getByRole('button', { name: 'settings.skills.bundleDialog.saveBtn' }));
     await flushMicrotasks(6);
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/skills/bundles/writing-bundle?agentId=agent-a'),
@@ -708,10 +786,10 @@ describe('SkillsTab — sticky skillsViewAgentId & toggleSkill race guard', () =
       }),
     );
 
-    fireEvent.click(screen.getByRole('button', { name: '打散 Writing Bundle' }));
+    fireEvent.click(screen.getByRole('button', { name: 'settings.skills.dissolveBundleAriaLabel' }));
     expect(confirmSpy).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog', { name: '打散 Bundle' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '打散' }));
+    expect(screen.getByRole('dialog', { name: 'settings.skills.bundleDialog.dissolveTitle' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'settings.skills.bundleDialog.dissolveBtn' }));
     await flushMicrotasks(6);
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/skills/bundles/writing-bundle'),
@@ -766,7 +844,7 @@ describe('SkillsTab — sticky skillsViewAgentId & toggleSkill race guard', () =
     render(<SkillsTab />);
     await flushMicrotasks(6);
 
-    fireEvent.click(screen.getByRole('button', { name: '导出 Writing Bundle' }));
+    fireEvent.click(screen.getByRole('button', { name: 'settings.skills.exportBundleAriaLabel' }));
     await flushMicrotasks(6);
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -774,7 +852,7 @@ describe('SkillsTab — sticky skillsViewAgentId & toggleSkill race guard', () =
       expect.objectContaining({ method: 'POST' }),
     );
     expect(showInFinder).toHaveBeenCalledWith('/tmp/Writing Bundle-skillbundle.zip');
-    expect(useSettingsStore.getState().toastMessage).toContain('Writing Bundle-skillbundle.zip');
+    expect(useSettingsStore.getState().toastMessage).toBe('settings.skills.exported');
   });
 
   it('persists bundle and bundled-skill order after drag and drop', async () => {
@@ -843,7 +921,7 @@ describe('SkillsTab — sticky skillsViewAgentId & toggleSkill race guard', () =
       }),
     );
 
-    fireEvent.click(screen.getAllByRole('button', { name: '展开 Bundle' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'settings.skills.expandBundleAriaLabel' })[0]);
 
     const skillDrag = createDragData();
     fireEvent.dragStart(screen.getAllByTestId('skill-row-reader')[0], { dataTransfer: skillDrag });

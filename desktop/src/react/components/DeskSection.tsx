@@ -13,20 +13,47 @@ import { loadDeskTreeFiles } from '../stores/desk-actions';
 import { schedulePersistCurrentWorkspaceUiState } from '../stores/workspace-ui-state-actions';
 import { ContextMenu } from '../ui';
 import { DESK_SORT_KEY, type SortMode, type CtxMenuState, type FileTypeFilter } from './desk/desk-types';
-import { DeskFilterButton, DeskOpenIconButton, DeskSearchBox, DeskSortButton } from './desk/DeskToolbar';
+import { DeskFilterButton, DeskOpenIconButton, DeskPreviewIconButton, DeskSearchBox, DeskSortButton } from './desk/DeskToolbar';
 import { DeskTree, type InlineCreateKind, type InlineTreeEdit } from './desk/DeskTree';
 import { DeskDropZone } from './desk/DeskDropZone';
 import { DeskEmptyOverlay } from './desk/DeskEmptyOverlay';
 import { DeskCwdSkillsButton, DeskCwdSkillsPanel } from './desk/DeskCwdSkills';
 import s from './desk/Desk.module.css';
-// @ts-expect-error — shared JS module
-import { workspaceDisplayName } from '../../../../shared/workspace-history.js';
+import { workspaceDisplayName } from '../../../../shared/workspace-history.ts';
 
 const DESK_FILTER_KEY = 'hana-desk-type-filters';
 const VALID_TYPE_FILTERS = new Set<FileTypeFilter>(['image', 'text', 'video']);
 
 function normalizeSubdir(value: string): string {
   return (value || '').replace(/^\/+|\/+$/g, '');
+}
+
+function isWindowsWorkspacePath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value);
+}
+
+function normalizeSubdirCompareKey(basePath: string, value: string): string {
+  const normalized = normalizeSubdir(value).replace(/\\/g, '/');
+  return isWindowsWorkspacePath(basePath) ? normalized.toLowerCase() : normalized;
+}
+
+function visibleDirtyTreeReloads(basePath: string, dirtyPaths: string[], expandedPaths: string[]): {
+  reloadSubdirs: string[];
+  clearSubdirs: string[];
+} {
+  const visibleByKey = new Map<string, string>();
+  for (const subdir of ['', ...expandedPaths]) {
+    visibleByKey.set(normalizeSubdirCompareKey(basePath, subdir), subdir);
+  }
+  const reloadSubdirs: string[] = [];
+  const clearSubdirs: string[] = [];
+  for (const dirtySubdir of dirtyPaths) {
+    const visibleSubdir = visibleByKey.get(normalizeSubdirCompareKey(basePath, dirtySubdir));
+    if (visibleSubdir === undefined) continue;
+    reloadSubdirs.push(visibleSubdir);
+    clearSubdirs.push(dirtySubdir);
+  }
+  return { reloadSubdirs, clearSubdirs };
 }
 
 function uniqueDraftName(baseName: string, files: Array<{ name: string }>): string {
@@ -66,9 +93,10 @@ export function DeskSection({
   const deskExpandedPaths = useStore(st => st.deskExpandedPaths);
   const deskTreeFilesByPath = useStore(st => st.deskTreeFilesByPath);
   const deskDirtyTreePaths = useStore(st => st.deskDirtyTreePaths);
-  const clearDeskTreeDirty = useStore(st => st.clearDeskTreeDirty);
   const setDeskExpandedPaths = useStore(st => st.setDeskExpandedPaths);
   const selectedFolder = useStore(st => st.selectedFolder);
+  const deskWorkspaceMountId = useStore(st => st.deskWorkspaceMountId);
+  const deskWorkspaceLabel = useStore(st => st.deskWorkspaceLabel);
   const homeFolder = useStore(st => st.homeFolder);
 
   const [sortMode, setSortMode] = useState<SortMode>(
@@ -80,14 +108,16 @@ export function DeskSection({
 
   useEffect(() => {
     if (!deskBasePath || deskDirtyTreePaths.length === 0) return;
-    const visibleTreeKeys = new Set(['', ...deskExpandedPaths]);
-    const reloadSubdirs = deskDirtyTreePaths.filter(subdir => visibleTreeKeys.has(subdir));
+    const { reloadSubdirs, clearSubdirs } = visibleDirtyTreeReloads(deskBasePath, deskDirtyTreePaths, deskExpandedPaths);
     if (reloadSubdirs.length === 0) return;
-    clearDeskTreeDirty(reloadSubdirs);
-    for (const subdir of reloadSubdirs) {
-      void loadDeskTreeFiles(subdir, { force: true });
+    for (let index = 0; index < reloadSubdirs.length; index += 1) {
+      const subdir = reloadSubdirs[index];
+      const dirtySubdir = clearSubdirs[index];
+      void loadDeskTreeFiles(subdir, { force: true }).then((ok) => {
+        if (ok !== false) useStore.getState().clearDeskTreeDirty([dirtySubdir]);
+      });
     }
-  }, [clearDeskTreeDirty, deskBasePath, deskDirtyTreePaths, deskExpandedPaths]);
+  }, [deskBasePath, deskDirtyTreePaths, deskExpandedPaths]);
 
   // ── 共享 context menu 状态 ──
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
@@ -130,9 +160,12 @@ export function DeskSection({
     setTypeFilters(filters);
   }, []);
 
-  const rootName = workspaceDisplayName(deskBasePath || selectedFolder || homeFolder, t('desk.title'));
+  const rootName = deskWorkspaceMountId
+    ? (deskWorkspaceLabel || deskWorkspaceMountId)
+    : workspaceDisplayName(deskBasePath || selectedFolder || homeFolder, t('desk.title'));
   const workspaceTitle = t('desk.workspaceTitle');
   const title = `${workspaceTitle} · ${rootName}`;
+  const titlePath = deskWorkspaceMountId ? rootName : (deskBasePath || selectedFolder || homeFolder || undefined);
 
   return (
     <>
@@ -144,7 +177,7 @@ export function DeskSection({
       >
         {showHeader && (
           <div className={s.header}>
-            <div className={`jian-section-title ${s.sectionTitle}`} title={deskBasePath || selectedFolder || homeFolder || undefined}>
+            <div className={`jian-section-title ${s.sectionTitle}`} title={titlePath}>
               {title}
             </div>
             <DeskCwdSkillsButton />
@@ -154,6 +187,7 @@ export function DeskSection({
         <DeskSearchBox />
         <div className={s.toolbar}>
           <div className={s.toolbarActions}>
+            <DeskPreviewIconButton />
             <DeskOpenIconButton />
             <DeskFilterButton filters={typeFilters} onFiltersChange={handleTypeFiltersChange} onShowMenu={handleShowMenu} />
             <DeskSortButton sortMode={sortMode} onSort={setSortMode} onShowMenu={handleShowMenu} />

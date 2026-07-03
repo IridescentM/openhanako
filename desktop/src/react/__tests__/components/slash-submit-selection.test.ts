@@ -21,9 +21,9 @@ function makeCommands() {
 }
 
 describe('resolveSlashSubmitSelection', () => {
-  it('keeps learned-skill extraction focused on workflows instead of user profile memory', () => {
+  it('keeps skill extraction focused on workflows instead of user profile memory', () => {
     expect(XING_PROMPT).toContain('不要把用户的个人画像');
-    expect(XING_PROMPT).toContain('只把“以后遇到类似任务应该怎么做”的内容写成自学技能');
+    expect(XING_PROMPT).toContain('只把“以后遇到类似任务应该怎么做”的内容写成通用技能');
     expect(XING_PROMPT).not.toContain('工作流程、偏好和纠正');
   });
 
@@ -50,6 +50,46 @@ describe('resolveSlashSubmitSelection', () => {
       commands,
       selectedIndex: 0,
       dismissedText: '/compa',
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it('allows server slash commands to keep arguments on submit', () => {
+    const commands = [
+      ...makeCommands(),
+      {
+        name: 'plugin_hello',
+        aliases: ['hello'],
+        label: '/plugin_hello',
+        description: 'plugin command',
+        busyLabel: '',
+        icon: '',
+        type: 'server-command' as const,
+        execute: vi.fn(),
+      },
+    ];
+
+    const result = resolveSlashSubmitSelection({
+      text: '/hello world',
+      skills: [],
+      commands,
+      selectedIndex: 0,
+      dismissedText: null,
+    });
+
+    expect(result?.name).toBe('plugin_hello');
+  });
+
+  it('does not treat builtin slash commands with arguments as local commands', () => {
+    const commands = makeCommands();
+
+    const result = resolveSlashSubmitSelection({
+      text: '/compact now',
+      skills: [],
+      commands,
+      selectedIndex: 0,
+      dismissedText: null,
     });
 
     expect(result).toBeNull();

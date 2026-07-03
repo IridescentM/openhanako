@@ -2,6 +2,11 @@ import { memo, useCallback, useMemo } from 'react';
 import type { ChatListItem, ChatMessage } from '../../stores/chat-types';
 import { UserMessage } from './UserMessage';
 import { AssistantMessage } from './AssistantMessage';
+import { ProcessFoldBlock } from './ProcessFoldBlock';
+import { InterludeBlock } from './InterludeBlock';
+import { buildTranscriptRenderItems, type TranscriptRenderItem } from './process-fold';
+import { useStore } from '../../stores';
+import { selectIsStreamingSession } from '../../stores/session-selectors';
 
 interface Props {
   items: ChatListItem[];
@@ -11,6 +16,7 @@ interface Props {
   hideUserIdentity?: boolean;
   userIdentity?: { name?: string | null; avatarUrl?: string | null };
   registerMessageElement?: (messageId: string, element: HTMLDivElement | null) => void;
+  enableProcessFold?: boolean;
 }
 
 export const ChatTranscript = memo(function ChatTranscript({
@@ -21,51 +27,200 @@ export const ChatTranscript = memo(function ChatTranscript({
   hideUserIdentity = false,
   userIdentity,
   registerMessageElement,
+  enableProcessFold = false,
 }: Props) {
-  const latestTurn = useMemo(() => {
-    let latestUserIndex = -1;
-    let latestAssistantIndex = -1;
-    for (let i = items.length - 1; i >= 0; i -= 1) {
-      const item = items[i];
-      if (item.type !== 'message') continue;
-      if (latestUserIndex < 0 && item.data.role === 'user') latestUserIndex = i;
-      if (latestAssistantIndex < 0 && item.data.role === 'assistant') latestAssistantIndex = i;
-      if (latestUserIndex >= 0 && latestAssistantIndex >= 0) break;
-    }
-    const latestUserItem = latestUserIndex >= 0 ? items[latestUserIndex] : null;
-    return {
-      latestUserIndex,
-      latestAssistantIndex,
-      latestUserMessage: latestUserItem?.type === 'message' && latestUserItem.data.role === 'user'
-        ? latestUserItem.data
-        : null,
-    };
-  }, [items]);
+  const isStreaming = useStore(s => selectIsStreamingSession(s, sessionPath));
+  const renderItems = useMemo(
+    () => enableProcessFold
+      ? buildTranscriptRenderItems(items, { isStreaming })
+      : items.map((item, originalIndex) => ({ type: 'source' as const, item, originalIndex })),
+    [enableProcessFold, isStreaming, items],
+  );
+  const turnState = useMemo(() => buildTurnState(items), [items]);
 
   return (
     <>
-      {items.map((item, index) => (
-        <TranscriptItemView
-          key={item.type === 'message' ? item.data.id : `c-${index}`}
-          item={item}
-          prevItem={index > 0 ? items[index - 1] : undefined}
+      {renderItems.map((renderItem) => (
+        <TranscriptRenderItemView
+          key={renderItemKey(renderItem)}
+          renderItem={renderItem}
+          sourceItems={items}
           sessionPath={sessionPath}
           agentId={agentId}
           readOnly={readOnly}
           hideUserIdentity={hideUserIdentity}
           userIdentity={userIdentity}
-          latestUserMessage={latestTurn.latestUserMessage}
-          isLatestUserMessage={index === latestTurn.latestUserIndex}
-          isLatestAssistantMessage={
-            index === latestTurn.latestAssistantIndex
-            && latestTurn.latestAssistantIndex > latestTurn.latestUserIndex
-          }
+          latestUserMessage={turnState.latestUserMessage}
+          latestUserIndex={turnState.latestUserIndex}
+          latestAssistantIndex={turnState.latestAssistantIndex}
+          turnCompletionAssistantIndexes={turnState.turnCompletionAssistantIndexes}
+          assistantTurnSelectionIdsByCompletionIndex={turnState.assistantTurnSelectionIdsByCompletionIndex}
+          isStreamingSession={isStreaming}
           registerMessageElement={registerMessageElement}
         />
       ))}
     </>
   );
 });
+
+function renderItemKey(renderItem: TranscriptRenderItem): string {
+  if (renderItem.type === 'process_fold') return renderItem.id;
+  const item = renderItem.item;
+  if (item.type === 'message') return item.data.id;
+  if (item.type === 'interlude') return `i-${item.id}`;
+  return `c-${renderItem.originalIndex}`;
+}
+
+function buildTurnState(items: ChatListItem[]): {
+  latestUserIndex: number;
+  latestAssistantIndex: number;
+  latestUserMessage: ChatMessage | null;
+  turnCompletionAssistantIndexes: ReadonlySet<number>;
+  assistantTurnSelectionIdsByCompletionIndex: ReadonlyMap<number, readonly string[]>;
+} {
+  let latestUserIndex = -1;
+  let latestAssistantIndex = -1;
+  let latestUserMessage: ChatMessage | null = null;
+  let pendingAssistantIndex = -1;
+  let pendingAssistantTurnIds: string[] = [];
+  const turnCompletionAssistantIndexes = new Set<number>();
+  const assistantTurnSelectionIdsByCompletionIndex = new Map<number, readonly string[]>();
+
+  const completePendingAssistantTurn = () => {
+    if (pendingAssistantIndex < 0) return;
+    turnCompletionAssistantIndexes.add(pendingAssistantIndex);
+    assistantTurnSelectionIdsByCompletionIndex.set(pendingAssistantIndex, pendingAssistantTurnIds);
+    pendingAssistantIndex = -1;
+    pendingAssistantTurnIds = [];
+  };
+
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    if (item.type !== 'message') continue;
+
+    if (item.data.role === 'user') {
+      completePendingAssistantTurn();
+      latestUserIndex = i;
+      latestUserMessage = item.data;
+      continue;
+    }
+
+    if (item.data.role === 'assistant') {
+      pendingAssistantIndex = i;
+      pendingAssistantTurnIds = [...pendingAssistantTurnIds, item.data.id];
+      latestAssistantIndex = i;
+    }
+  }
+
+  completePendingAssistantTurn();
+
+  return {
+    latestUserIndex,
+    latestAssistantIndex,
+    latestUserMessage,
+    turnCompletionAssistantIndexes,
+    assistantTurnSelectionIdsByCompletionIndex,
+  };
+}
+
+const TranscriptRenderItemView = memo(function TranscriptRenderItemView({
+  renderItem,
+  sourceItems,
+  sessionPath,
+  agentId,
+  readOnly,
+  hideUserIdentity,
+  userIdentity,
+  latestUserMessage,
+  latestUserIndex,
+  latestAssistantIndex,
+  turnCompletionAssistantIndexes,
+  assistantTurnSelectionIdsByCompletionIndex,
+  isStreamingSession,
+  registerMessageElement,
+}: {
+  renderItem: TranscriptRenderItem;
+  sourceItems: ChatListItem[];
+  sessionPath: string;
+  agentId?: string | null;
+  readOnly: boolean;
+  hideUserIdentity: boolean;
+  userIdentity?: { name?: string | null; avatarUrl?: string | null };
+  latestUserMessage?: ChatMessage | null;
+  latestUserIndex: number;
+  latestAssistantIndex: number;
+  turnCompletionAssistantIndexes: ReadonlySet<number>;
+  assistantTurnSelectionIdsByCompletionIndex: ReadonlyMap<number, readonly string[]>;
+  isStreamingSession: boolean;
+  registerMessageElement?: (messageId: string, element: HTMLDivElement | null) => void;
+}) {
+  const originalIndex = renderItem.originalIndex;
+  const prevMessageItem = previousMessageItem(sourceItems, originalIndex);
+
+  if (renderItem.type === 'process_fold') {
+    const prevRole = prevMessageItem?.data.role ?? null;
+    return (
+      <ProcessFoldBlock
+        group={renderItem}
+        showAvatar={prevRole !== 'assistant'}
+        sessionPath={sessionPath}
+        agentId={agentId}
+        readOnly={readOnly}
+        turnCompletionAssistantIndexes={turnCompletionAssistantIndexes}
+        assistantTurnSelectionIdsByCompletionIndex={assistantTurnSelectionIdsByCompletionIndex}
+        completionTimePersistent={
+          turnCompletionAssistantIndexes.has(groupLastOriginalIndex(renderItem))
+          && groupLastOriginalIndex(renderItem) === latestAssistantIndex
+          && latestAssistantIndex > latestUserIndex
+          && !isStreamingSession
+        }
+        registerMessageElement={registerMessageElement}
+      />
+    );
+  }
+
+  const showTurnCompletionTime = turnCompletionAssistantIndexes.has(originalIndex)
+    && !(
+      isStreamingSession
+      && originalIndex === latestAssistantIndex
+      && latestAssistantIndex > latestUserIndex
+    );
+
+  return (
+    <TranscriptItemView
+      item={renderItem.item}
+      prevItem={prevMessageItem}
+      sessionPath={sessionPath}
+      agentId={agentId}
+      readOnly={readOnly}
+      hideUserIdentity={hideUserIdentity}
+      userIdentity={userIdentity}
+      latestUserMessage={latestUserMessage}
+      isLatestUserMessage={originalIndex === latestUserIndex}
+      isLatestAssistantMessage={
+        originalIndex === latestAssistantIndex
+        && latestAssistantIndex > latestUserIndex
+      }
+      showTurnCompletionTime={showTurnCompletionTime}
+      assistantTurnSelectionIds={showTurnCompletionTime
+        ? assistantTurnSelectionIdsByCompletionIndex.get(originalIndex)
+        : undefined}
+      registerMessageElement={registerMessageElement}
+    />
+  );
+});
+
+function previousMessageItem(items: ChatListItem[], beforeIndex: number): Extract<ChatListItem, { type: 'message' }> | undefined {
+  for (let i = beforeIndex - 1; i >= 0; i -= 1) {
+    const item = items[i];
+    if (item.type === 'message') return item;
+  }
+  return undefined;
+}
+
+function groupLastOriginalIndex(renderItem: Extract<TranscriptRenderItem, { type: 'process_fold' }>): number {
+  return renderItem.items[renderItem.items.length - 1]?.originalIndex ?? renderItem.originalIndex;
+}
 
 const TranscriptItemView = memo(function TranscriptItemView({
   item,
@@ -78,6 +233,8 @@ const TranscriptItemView = memo(function TranscriptItemView({
   latestUserMessage,
   isLatestUserMessage,
   isLatestAssistantMessage,
+  showTurnCompletionTime,
+  assistantTurnSelectionIds,
   registerMessageElement,
 }: {
   item: ChatListItem;
@@ -90,6 +247,8 @@ const TranscriptItemView = memo(function TranscriptItemView({
   latestUserMessage?: ChatMessage | null;
   isLatestUserMessage: boolean;
   isLatestAssistantMessage: boolean;
+  showTurnCompletionTime: boolean;
+  assistantTurnSelectionIds?: readonly string[];
   registerMessageElement?: (messageId: string, element: HTMLDivElement | null) => void;
 }) {
   const messageId = item.type === 'message' ? item.data.id : null;
@@ -98,6 +257,7 @@ const TranscriptItemView = memo(function TranscriptItemView({
   }, [messageId, registerMessageElement]);
 
   if (item.type === 'compaction') return null;
+  if (item.type === 'interlude') return <InterludeBlock block={item.data} />;
 
   const msg = item.data;
   const prevRole = prevItem?.type === 'message' ? prevItem.data.role : null;
@@ -126,6 +286,8 @@ const TranscriptItemView = memo(function TranscriptItemView({
       agentId={agentId}
       readOnly={readOnly}
       isLatestAssistantMessage={isLatestAssistantMessage}
+      showTurnCompletionTime={showTurnCompletionTime}
+      assistantTurnSelectionIds={assistantTurnSelectionIds}
       retrySourceMessage={latestUserMessage}
       messageRef={messageRef}
     />

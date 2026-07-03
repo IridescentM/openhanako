@@ -1,4 +1,6 @@
 import type { ChatListItem, ChatMessage } from '../../stores/chat-types';
+export { measureTimelineMarkerWidthEm } from '../shared/timeline-marker-width';
+import { measureTimelineMarkerWidthEm } from '../shared/timeline-marker-width';
 
 export interface TimelineAnchor {
   messageId: string;
@@ -38,7 +40,10 @@ function normalizedPreviewSource(message: ChatMessage): string {
   const firstAttachment = message.attachments?.find(attachment => attachment.name?.trim());
   if (firstAttachment?.name) return firstAttachment.name.trim();
 
-  return message.role === 'user' ? '用户消息' : '助手消息';
+  const t = typeof window !== 'undefined' ? window.t : undefined;
+  return message.role === 'user'
+    ? (t?.('chat.timeline.fallbackUser') || 'User message')
+    : (t?.('chat.timeline.fallbackAssistant') || 'Assistant message');
 }
 
 export function formatTimelinePromptPreview(text: string, maxChars = 10): string {
@@ -48,13 +53,6 @@ export function formatTimelinePromptPreview(text: string, maxChars = 10): string
   const chars = Array.from(normalized);
   if (chars.length <= maxChars) return normalized;
   return `${chars.slice(0, maxChars).join('')}...`;
-}
-
-export function measureTimelineMarkerWidthEm(promptLength: number): number {
-  if (!Number.isFinite(promptLength) || promptLength <= 2) return 0.5;
-
-  const normalized = Math.min(1, Math.log1p(promptLength - 2) / Math.log1p(80));
-  return Number((0.5 + normalized * 0.5).toFixed(3));
 }
 
 function readDateParts(timestamp: number, timeZone?: string): DateParts {

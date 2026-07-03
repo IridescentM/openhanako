@@ -3,9 +3,13 @@
  */
 
 import { memo, useState, useCallback, useEffect } from 'react';
+import { Collapse } from '@/ui';
 import styles from './Chat.module.css';
 import { extractToolDetail } from '../../utils/message-parser';
 import type { ToolDetail } from '../../utils/message-parser';
+import { openInternalLink } from '../../utils/link-open';
+import { isToolCallHiddenFromProcessUi } from '../../utils/tool-call-visibility';
+import { LinkContextMenu, type LinkContextMenuState } from '../shared/LinkContextMenu';
 
 import type { ToolCall } from '../../stores/chat-types';
 
@@ -18,14 +22,19 @@ interface Props {
 function getToolLabel(name: string, phase: string, agentName: string): string {
   const t = window.t;
   const vars = { name: agentName };
-  const val = t?.(`tool.${name}.${phase}`, vars);
-  if (val && val !== `tool.${name}.${phase}`) return val;
+  const labelName = name === 'exec_command'
+    ? 'bash'
+    : name === 'write_stdin'
+      ? 'terminal'
+      : name;
+  const val = t?.(`tool.${labelName}.${phase}`, vars);
+  if (val && val !== `tool.${labelName}.${phase}`) return val;
   return t?.(`tool._fallback.${phase}`, vars) || name;
 }
 
 export const ToolGroupBlock = memo(function ToolGroupBlock({ tools: rawTools, collapsed: initialCollapsed, agentName = 'Hanako' }: Props) {
-  // subagent 有独立卡片，不在工具组里重复显示
-  const tools = rawTools.filter(t => t.name !== 'subagent');
+  // 独立卡片或产物块承接状态的工具，不在工具组里重复显示。
+  const tools = rawTools.filter(t => !isToolCallHiddenFromProcessUi(t));
   const [collapsed, setCollapsed] = useState(initialCollapsed);
   useEffect(() => {
     setCollapsed(initialCollapsed);
@@ -66,11 +75,21 @@ export const ToolGroupBlock = memo(function ToolGroupBlock({ tools: rawTools, co
           )}
         </div>
       )}
-      <div className={`${styles.toolGroupContent}${collapsed && !isSingle ? ` ${styles.toolGroupContentCollapsed}` : ''}`}>
-        {tools.map((tool, i) => (
-          <ToolIndicator key={`${tool.name}-${i}`} tool={tool} agentName={agentName} />
-        ))}
-      </div>
+      {isSingle ? (
+        <div className={styles.toolGroupContent}>
+          {tools.map((tool, i) => (
+            <ToolIndicator key={tool.id || `${tool.name}-${i}`} tool={tool} agentName={agentName} />
+          ))}
+        </div>
+      ) : (
+        <Collapse open={!collapsed}>
+          <div className={styles.toolGroupContent}>
+            {tools.map((tool, i) => (
+              <ToolIndicator key={tool.id || `${tool.name}-${i}`} tool={tool} agentName={agentName} />
+            ))}
+          </div>
+        </Collapse>
+      )}
     </div>
   );
 });
@@ -81,53 +100,13 @@ function handleDetailClick(e: React.MouseEvent, detail: ToolDetail) {
   e.preventDefault();
   e.stopPropagation();
   if (!detail.href) return;
-  if (detail.hrefType === 'file') {
-    window.platform?.showInFinder?.(detail.href);
-  } else {
-    window.platform?.openExternal?.(detail.href);
-  }
-}
-
-function finiteNumber(value: unknown): number | null {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function waitSecondsFromTool(tool: ToolCall, now: number): number | null {
-  const args = tool.args || {};
-  const details = tool.details || {};
-  const detailSeconds = finiteNumber(details.seconds);
-  const argSeconds = finiteNumber(args.seconds);
-  const seconds = detailSeconds ?? argSeconds;
-
-  if (tool.done) return seconds;
-
-  const startedAt = finiteNumber(args.startedAt);
-  const durationMs = finiteNumber(args.durationMs);
-  if (startedAt !== null && durationMs !== null) {
-    return Math.max(0, Math.ceil((startedAt + durationMs - now) / 1000));
-  }
-  return seconds;
-}
-
-function waitToolDetail(tool: ToolCall, now: number): ToolDetail {
-  const seconds = waitSecondsFromTool(tool, now);
-  return { text: seconds === null ? '?s' : `${seconds}s` };
+  void openInternalLink(detail.href, { origin: 'session' });
 }
 
 const ToolIndicator = memo(function ToolIndicator({ tool, agentName }: { tool: ToolCall; agentName: string }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (tool.name !== 'wait' || tool.done) return;
-    if (finiteNumber(tool.args?.startedAt) === null || finiteNumber(tool.args?.durationMs) === null) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [tool.name, tool.done, tool.args?.startedAt, tool.args?.durationMs]);
+  const [linkMenu, setLinkMenu] = useState<LinkContextMenuState | null>(null);
 
-  const detail = tool.name === 'wait'
-    ? waitToolDetail(tool, now)
-    : extractToolDetail(tool.name, tool.args);
+  const detail = extractToolDetail(tool.name, tool.args);
   const label = getToolLabel(tool.name, tool.done ? 'done' : 'running', agentName);
   const detailTitle = detail.title || detail.href;
 
@@ -144,6 +123,16 @@ const ToolIndicator = memo(function ToolIndicator({ tool, agentName }: { tool: T
               className={`${styles.toolDetail} ${styles.toolDetailLink}`}
               title={detailTitle}
               onClick={(e) => handleDetailClick(e, detail)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!detail.href) return;
+                setLinkMenu({
+                  href: detail.href,
+                  context: { origin: 'session', label: detail.text },
+                  position: { x: e.clientX, y: e.clientY },
+                });
+              }}
             >
               {detail.text}
             </span>
@@ -160,6 +149,12 @@ const ToolIndicator = memo(function ToolIndicator({ tool, agentName }: { tool: T
           <span className={styles.toolDots} />
         )}
       </div>
+      {linkMenu && (
+        <LinkContextMenu
+          state={linkMenu}
+          onClose={() => setLinkMenu(null)}
+        />
+      )}
     </>
   );
 });

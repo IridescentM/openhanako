@@ -30,10 +30,6 @@ vi.mock('../../stores/session-actions', () => ({
   loadSessions: vi.fn(),
 }));
 
-vi.mock('../../stores/desk-actions', () => ({
-  loadDeskFiles: vi.fn(),
-}));
-
 vi.mock('../../stores/channel-actions', () => ({
   appendChannelMessage: appendChannelMessageMock,
   markChannelMessagesDirty: markChannelMessagesDirtyMock,
@@ -66,6 +62,7 @@ describe('channel_new_message websocket routing', () => {
     useStore.setState({
       currentTab: 'channels',
       currentChannel: 'ch_crew',
+      channels: [{ id: 'ch_crew', name: 'Crew' }],
       channelMessages: [
         { sender: 'user', timestamp: '2026-05-07 17:00:00', body: 'old' },
       ],
@@ -141,6 +138,38 @@ describe('channel_new_message websocket routing', () => {
 
     expect(appendChannelMessageMock).toHaveBeenCalledWith('ch_crew', message, { markRead: false });
     expect(openChannelMock).not.toHaveBeenCalled();
+  });
+
+  it('reloads the channel list when a message arrives for an unknown channel', () => {
+    useStore.setState({
+      currentTab: 'chat',
+      currentChannel: 'ch_crew',
+      channels: [{ id: 'ch_crew', name: 'Crew' }],
+    } as never);
+    const message = {
+      sender: 'hanako',
+      timestamp: '2026-05-07 17:02:00',
+      body: 'new channel message',
+    };
+
+    handleServerMessage({
+      type: 'channel_new_message',
+      channelName: 'ch_new',
+      sender: 'hanako',
+      message,
+    });
+
+    expect(loadChannelsMock).toHaveBeenCalledOnce();
+    expect(appendChannelMessageMock).toHaveBeenCalledWith('ch_new', message, { markRead: false });
+  });
+
+  it('reloads the channel list when the host reports a created channel', () => {
+    handleServerMessage({
+      type: 'channel_created',
+      channelName: 'ch_new',
+    });
+
+    expect(loadChannelsMock).toHaveBeenCalledOnce();
   });
 
   it('marks message-less channel events dirty for the keyed channel cache', () => {

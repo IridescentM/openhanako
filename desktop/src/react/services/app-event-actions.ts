@@ -5,9 +5,9 @@ import { loadSessions, switchSession } from '../stores/session-actions';
 import { loadModels } from '../utils/ui-helpers';
 import { activateWorkspaceDesk } from '../stores/desk-actions';
 import { loadChannels } from '../stores/channel-actions';
+import { applyChatLayout } from '../chat/layout';
 import { applyEditorTypography } from '../editor/typography';
-// @ts-expect-error — shared JS module
-import { mergeWorkspaceHistory } from '../../../../shared/workspace-history.js';
+import { mergeWorkspaceHistory } from '../../../../shared/workspace-history.ts';
 
 declare const i18n: {
   locale: string;
@@ -63,22 +63,27 @@ function handleAgentWorkspaceChanged(data: any): void {
   const previousHomeFolder = state.homeFolder || null;
   const previousSelectedFolder = state.selectedFolder || null;
   const nextHomeFolder = normalizeWorkspacePath(data.homeFolder);
-  const selectedFollowedDefault = !previousSelectedFolder || previousSelectedFolder === previousHomeFolder;
+  const selectedFollowedDefault = !state.selectedWorkspaceMountId
+    && (!previousSelectedFolder || previousSelectedFolder === previousHomeFolder);
   const nextSelectedFolder = selectedFollowedDefault ? nextHomeFolder : previousSelectedFolder;
   const deskWasShowingDefault =
-    state.pendingNewSession ||
-    !state.currentSessionPath ||
-    !state.deskBasePath ||
-    (!!previousHomeFolder && state.deskBasePath === previousHomeFolder);
+    !state.deskWorkspaceMountId && (
+      state.pendingNewSession ||
+      !state.currentSessionPath ||
+      !state.deskBasePath ||
+      (!!previousHomeFolder && state.deskBasePath === previousHomeFolder)
+    );
 
   useStore.setState({
     homeFolder: nextHomeFolder,
     selectedFolder: nextSelectedFolder,
+    selectedWorkspaceMountId: selectedFollowedDefault ? null : state.selectedWorkspaceMountId,
+    selectedWorkspaceLabel: selectedFollowedDefault ? null : state.selectedWorkspaceLabel,
     workspaceFolders: [],
   });
 
   if (deskWasShowingDefault) {
-    void activateWorkspaceDesk(nextHomeFolder);
+    void activateWorkspaceDesk(nextHomeFolder, { mountId: null });
   }
 }
 
@@ -154,10 +159,36 @@ export function handleAppEvent(type: string, data: any = {}, options: AppEventOp
       }
       break;
     }
-    case 'agent-created':
-    case 'agent-deleted':
-      loadAgents();
+    case 'skills-changed': {
+      useStore.setState((state: any) => ({
+        skillCatalogVersion: (Number(state.skillCatalogVersion) || 0) + 1,
+      }));
+      window.dispatchEvent(new CustomEvent('hana-skills-changed', { detail: data || {} }));
+      if (options.source === 'server') {
+        window.platform?.settingsChanged?.('skills-changed', data || {});
+      }
       break;
+    }
+    case 'agent-created':
+      loadAgents();
+      loadChannels();
+      break;
+    case 'agent-deleted': {
+      // If the currently open conversation is a DM with the deleted agent, clear it
+      const deletedDmId = data.agentId ? `dm:${data.agentId}` : null;
+      if (deletedDmId && useStore.getState().currentChannel === deletedDmId) {
+        useStore.setState({
+          currentChannel: null,
+          channelMessages: [],
+          channelHeaderName: '',
+          channelHeaderMembersText: '',
+          channelIsDM: false,
+        });
+      }
+      loadAgents();
+      loadChannels();
+      break;
+    }
     case 'agent-updated': {
       const currentAgentId = useStore.getState().currentAgentId;
       if (data.agentId && data.agentId !== currentAgentId) {
@@ -193,6 +224,16 @@ export function handleAppEvent(type: string, data: any = {}, options: AppEventOp
     case 'agent-workspace-changed':
       handleAgentWorkspaceChanged(data);
       break;
+    case 'session-authorized-folders-updated':
+      if (typeof data.sessionPath === 'string' && data.sessionPath) {
+        useStore.getState().setSessionAuthorizedFolders(
+          data.sessionPath,
+          Array.isArray(data.authorizedFolders)
+            ? data.authorizedFolders.filter((p: unknown): p is string => typeof p === 'string' && !!p.trim())
+            : [],
+        );
+      }
+      break;
     case 'theme-changed':
       window.setTheme(data.theme);
       break;
@@ -202,9 +243,17 @@ export function handleAppEvent(type: string, data: any = {}, options: AppEventOp
     case 'editor-typography-changed':
       applyEditorTypography(data.editor ?? data);
       break;
+    case 'chat-layout-changed':
+      applyChatLayout(data.chat ?? data);
+      break;
     case 'network-proxy-changed':
       if (options.source === 'server') {
         window.platform?.settingsChanged?.('network-proxy-changed', data);
+      }
+      break;
+    case 'keep-awake-changed':
+      if (options.source === 'server') {
+        window.platform?.settingsChanged?.('keep-awake-changed', data);
       }
       break;
     case 'paper-texture-changed':

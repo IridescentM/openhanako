@@ -612,7 +612,39 @@ describe('channel-actions', () => {
     });
   });
 
+  describe('createChannel', () => {
+    it('reads backend JSON errors instead of losing them to the fetch wrapper', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: async () => ({
+          code: 'CHANNEL_AGENT_NOT_FOUND',
+          error: 'Agent not found: ghost',
+        }),
+      } as Response);
+
+      const { createChannel } = await import('../../stores/channel-actions');
+
+      await expect(createChannel('mixed', ['alice', 'ghost'])).rejects.toThrow('Agent not found: ghost');
+      expect(mockFetch).toHaveBeenCalledWith('/api/channels', expect.objectContaining({
+        method: 'POST',
+        throwOnHttpError: false,
+      }));
+    });
+  });
+
   describe('toggleChannelsEnabled', () => {
+    it('未知频道开关状态时不猜测下一值', async () => {
+      mockState.channelsEnabled = undefined;
+
+      const { toggleChannelsEnabled } = await import('../../stores/channel-actions');
+      const result = await toggleChannelsEnabled();
+
+      expect(result).toBeUndefined();
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(setStateCalls).toEqual([]);
+    });
+
     it('切换开关状态', async () => {
       mockState.channelsEnabled = true;
 
@@ -630,6 +662,45 @@ describe('channel-actions', () => {
         expect.stringContaining('/api/channels/toggle'),
         expect.objectContaining({ method: 'POST' }),
       );
+    });
+
+    it('打开频道开关时先启用后端，再加载频道列表', async () => {
+      mockState.channelsEnabled = false;
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url === '/api/channels/toggle') {
+          return {
+            ok: true,
+            json: async () => ({ ok: true, enabled: true }),
+          } as Response;
+        }
+        if (url === '/api/channels') {
+          return {
+            ok: true,
+            json: async () => ({ channels: [{ id: 'ch1', name: 'general', newMessageCount: 0 }] }),
+          } as Response;
+        }
+        if (url === '/api/dm') {
+          return {
+            ok: true,
+            json: async () => ({ dms: [] }),
+          } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+
+      const { toggleChannelsEnabled } = await import('../../stores/channel-actions');
+      const result = await toggleChannelsEnabled();
+
+      expect(result).toBe(true);
+      expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
+        '/api/channels/toggle',
+        '/api/channels',
+        '/api/dm',
+      ]);
+      expect(mockState.channelsEnabled).toBe(true);
+      expect(mockState.channels).toEqual([
+        expect.objectContaining({ id: 'ch1', isDM: false }),
+      ]);
     });
   });
 });

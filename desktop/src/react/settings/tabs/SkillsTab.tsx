@@ -5,12 +5,9 @@ import { t } from '../helpers';
 import { SkillBundleTree, type SkillBundleInfo } from './skills/SkillBundleTree';
 import { SkillCapabilities } from './skills/SkillCapabilities';
 import { CompatPathDrawer } from './skills/CompatPathDrawer';
-import { LearnedSkillsBlock } from './skills/LearnedSkillsBlock';
 import { AgentSelect } from './bridge/AgentSelect';
 import { SettingsSection } from '../components/SettingsSection';
 import styles from '../Settings.module.css';
-
-const platform = window.platform;
 
 type BundleDialogState =
   | { type: 'create'; name: string }
@@ -20,6 +17,18 @@ type BundleDialogState =
 interface ExternalPathsData {
   configured: string[];
   discovered: { dirPath: string; label: string; exists: boolean }[];
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error('failed to read file'));
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      resolve(result.includes(',') ? result.split(',').pop() || '' : result);
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 export function SkillsTab() {
@@ -34,7 +43,10 @@ export function SkillsTab() {
 
   const [skillsList, setSkillsList] = useState<SkillInfo[]>([]);
   const [skillBundles, setSkillBundles] = useState<SkillBundleInfo[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const skillsListOwnerIdRef = useRef<string | null>(null);
   const [bundleDialog, setBundleDialog] = useState<BundleDialogState | null>(null);
+  const skillFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (skillsViewAgentId) return;
@@ -48,11 +60,23 @@ export function SkillsTab() {
 
   const loadSkills = useCallback(async () => {
     const agentId = skillsViewAgentIdRef.current;
-    if (!agentId) return;
+    if (!agentId) {
+      skillsListOwnerIdRef.current = null;
+      setSkillsList([]);
+      setSkillBundles([]);
+      setSkillsLoading(false);
+      return;
+    }
+    const ownerChanged = skillsListOwnerIdRef.current !== agentId;
+    if (ownerChanged) {
+      setSkillsLoading(true);
+      setSkillsList([]);
+      setSkillBundles([]);
+    }
     try {
       const snapshotAgentId = agentId;
       const [skillsRes, bundlesRes] = await Promise.all([
-        hanaFetch(`/api/skills?agentId=${encodeURIComponent(agentId)}`),
+        hanaFetch(`/api/skills?agentId=${encodeURIComponent(agentId)}&runtime=1`),
         hanaFetch(`/api/skills/bundles?agentId=${encodeURIComponent(agentId)}`),
       ]);
       const data = await skillsRes.json();
@@ -62,8 +86,13 @@ export function SkillsTab() {
       if (skillsViewAgentIdRef.current !== snapshotAgentId) return;
       setSkillsList(data.skills || []);
       setSkillBundles(bundleData.bundles || []);
+      skillsListOwnerIdRef.current = snapshotAgentId;
     } catch (err) {
       console.error('[skills] load failed:', err);
+    } finally {
+      if (skillsViewAgentIdRef.current === agentId && ownerChanged) {
+        setSkillsLoading(false);
+      }
     }
   }, []);
 
@@ -85,9 +114,18 @@ export function SkillsTab() {
     loadExternalPaths();
   }, [loadSkills, loadExternalPaths, skillsViewAgentId]);
 
+  useEffect(() => {
+    const refresh = () => {
+      void loadSkills();
+      void loadExternalPaths();
+    };
+    window.addEventListener('hana-skills-changed', refresh);
+    return () => window.removeEventListener('hana-skills-changed', refresh);
+  }, [loadSkills, loadExternalPaths]);
+
   const visible = skillsList.filter(s => !s.hidden);
-  const userSkills = visible.filter(s => s.source !== 'learned' && s.source !== 'external');
-  const learnedSkills = visible.filter(s => s.source === 'learned');
+  const userSkills = visible.filter(s => s.source !== 'external');
+  const manageableSkills = userSkills.filter(s => s.source !== 'workspace' && s.managedBy !== 'workspace' && s.managedBy !== 'plugin');
   const externalSkills = visible.filter(s => s.source === 'external');
 
   // 后台翻译技能名
@@ -127,10 +165,41 @@ export function SkillsTab() {
     }
   };
 
+  const installSkillFromFile = async (file: File) => {
+    const filePath = window.platform?.getFilePath?.(file) || (file as File & { path?: string })?.path;
+    if (filePath) {
+      await installSkillFromPath(filePath);
+      return;
+    }
+    try {
+      const contentBase64 = await fileToBase64(file);
+      const res = await hanaFetch('/api/skills/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          file: {
+            filename: file.name || 'skill.skill',
+            contentBase64,
+          },
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      showToast(t('settings.skills.installSuccess', { name: data.skill?.name || '' }), 'success');
+      await loadSkills();
+    } catch (err: unknown) {
+      showToast(t('settings.skills.installError') + ': ' + (err instanceof Error ? err.message : String(err)), 'error');
+    }
+  };
+
   const installSkill = async () => {
-    const selectedPath = await platform?.selectSkill?.();
-    if (!selectedPath) return;
-    await installSkillFromPath(selectedPath);
+    if (typeof window.platform?.selectSkill === 'function') {
+      const selectedPath = await window.platform.selectSkill();
+      if (!selectedPath) return;
+      await installSkillFromPath(selectedPath);
+      return;
+    }
+    skillFileInputRef.current?.click();
   };
 
   const deleteSkill = async (name: string) => {
@@ -214,8 +283,11 @@ export function SkillsTab() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       const skipped = Array.isArray(data.warnings) ? data.warnings.length : 0;
-      const suffix = skipped > 0 ? `，跳过 ${skipped} 个缺失 Skill` : '';
-      showToast(`已导出 ${data.fileName || bundle.name}${suffix}`, 'success');
+      const fileName = data.fileName || bundle.name;
+      const msg = skipped > 0
+        ? t('settings.skills.exportedWithSkipped', { fileName, count: String(skipped) })
+        : t('settings.skills.exported', { fileName });
+      showToast(msg, 'success');
       if (data.filePath) {
         window.platform?.showInFinder?.(data.filePath);
       }
@@ -402,12 +474,11 @@ export function SkillsTab() {
     (e.currentTarget as HTMLElement).classList.remove(styles['drag-over']);
     const file = e.dataTransfer.files[0];
     if (!file) return;
-    const filePath = platform?.getFilePath?.(file) || (file as File & { path?: string })?.path;
-    if (filePath) await installSkillFromPath(filePath);
+    await installSkillFromFile(file);
   };
 
   const addExternalPath = async () => {
-    const folder = await platform?.selectFolder?.();
+    const folder = await window.platform?.selectFolder?.();
     if (!folder) return;
     const newPaths = [...externalPathsData.configured, folder];
     try {
@@ -440,7 +511,7 @@ export function SkillsTab() {
     }
   };
 
-  const learnCfg = settingsConfig?.capabilities?.learn_skills || {};
+  const skillInstallCfg = settingsConfig ? settingsConfig.capabilities?.learn_skills || {} : undefined;
   const discoveredPaths = externalPathsData.discovered;
   const configuredOnlyPaths = externalPathsData.configured.filter(
     p => !discoveredPaths.some(d => d.dirPath === p),
@@ -465,14 +536,27 @@ export function SkillsTab() {
           </svg>
           <span>{t('settings.skills.dropzone')}</span>
         </div>
+        <input
+          ref={skillFileInputRef}
+          type="file"
+          accept=".zip,.skill"
+          hidden
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0] || null;
+            event.currentTarget.value = '';
+            if (file) void installSkillFromFile(file);
+          }}
+        />
 
-        {userSkills.length === 0 && skillBundles.length === 0 ? (
+        {skillsLoading ? (
+          <p className={`${styles['settings-muted-note']} ${styles['skills-empty']}`}>{t('status.loading')}</p>
+        ) : manageableSkills.length === 0 && skillBundles.length === 0 ? (
           <p className={`${styles['settings-muted-note']} ${styles['skills-empty']}`}>{t('settings.skills.noUser')}</p>
         ) : (
           <SkillBundleTree
             mode="manage"
             bundles={skillBundles}
-            skills={userSkills}
+            skills={manageableSkills}
             nameHints={nameHints}
             emptyText={t('settings.skills.noUser')}
             onDeleteSkill={deleteSkill}
@@ -488,12 +572,12 @@ export function SkillsTab() {
       </SettingsSection>
 
       {/* Section 2: 全局能力（子组件，保持原样） */}
-      <SkillCapabilities learnCfg={learnCfg} />
+      <SkillCapabilities installCfg={skillInstallCfg} />
 
       {/* Section 3A: Agent Skills 开关（per-Agent 开关）
-       * AgentSelect 作为 section context；skill list 直接作为 section body children，
-       * 由 SettingsSection 白卡承担卡片视觉，避免卡中卡 */}
+       * flush：skills-list-block 自带卡片视觉，section 不再套外层白卡 */}
       <SettingsSection
+        variant="flush"
         title={t('settings.skills.userSkillsTitle')}
         context={
           <AgentSelect
@@ -502,8 +586,12 @@ export function SkillsTab() {
           />
         }
       >
-        {userSkills.length === 0 && skillBundles.length === 0 ? (
-          <p className={styles['agent-skill-empty']} style={{ padding: 'var(--space-md)', margin: 0 }}>
+        {skillsLoading ? (
+          <p className={styles['agent-skill-empty']} style={{ padding: 'var(--space-16)', margin: 0 }}>
+            {t('status.loading')}
+          </p>
+        ) : userSkills.length === 0 && skillBundles.length === 0 ? (
+          <p className={styles['agent-skill-empty']} style={{ padding: 'var(--space-16)', margin: 0 }}>
             {t('settings.skills.noUser')}
           </p>
         ) : (
@@ -519,16 +607,6 @@ export function SkillsTab() {
         )}
       </SettingsSection>
 
-      {/* Section 3B: 自学 Skill（per-Agent 资产，同受 AgentSelect 影响） */}
-      <SettingsSection title={t('settings.skills.learnedSkillsTitle')}>
-        <LearnedSkillsBlock
-          learnedSkills={learnedSkills}
-          nameHints={nameHints}
-          onDelete={deleteSkill}
-          onToggle={toggleSkill}
-        />
-      </SettingsSection>
-
       {/* Section 4: 外部兼容
        * flush：CompatPathDrawer 自带卡片视觉，外壳不再套白卡 */}
       <SettingsSection title={t('settings.skills.compatTitle')} variant="flush">
@@ -536,7 +614,7 @@ export function SkillsTab() {
           fontSize: '0.7rem',
           color: 'var(--text-muted)',
           lineHeight: 1.4,
-          margin: '0 0 var(--space-md)',
+          margin: '0 0 var(--space-16)',
         }}>
           {t('settings.skills.compatDesc')}
         </p>
@@ -589,25 +667,25 @@ export function SkillsTab() {
             aria-modal="true"
             aria-label={
               bundleDialog.type === 'create'
-                ? '新建 Bundle'
+                ? t('settings.skills.bundleDialog.createTitle')
                 : bundleDialog.type === 'rename'
-                  ? '重命名 Bundle'
-                  : '打散 Bundle'
+                  ? t('settings.skills.bundleDialog.renameTitle')
+                  : t('settings.skills.bundleDialog.dissolveTitle')
             }
             onSubmit={submitBundleDialog}
           >
             <div className={styles['skill-bundle-dialog-header']}>
               <h3>
                 {bundleDialog.type === 'create'
-                  ? '新建 Bundle'
+                  ? t('settings.skills.bundleDialog.createTitle')
                   : bundleDialog.type === 'rename'
-                    ? '重命名 Bundle'
-                    : '打散 Bundle'}
+                    ? t('settings.skills.bundleDialog.renameTitle')
+                    : t('settings.skills.bundleDialog.dissolveTitle')}
               </h3>
               <button
                 type="button"
-                title="取消"
-                aria-label="取消"
+                title={t('settings.skills.bundleDialog.cancel')}
+                aria-label={t('settings.skills.bundleDialog.closeAriaLabel')}
                 onClick={() => setBundleDialog(null)}
               >
                 ×
@@ -615,11 +693,11 @@ export function SkillsTab() {
             </div>
             {bundleDialog.type === 'delete' ? (
               <p className={styles['skill-bundle-dialog-text']}>
-                打散 {bundleDialog.bundle.name}？Skill 会保留在公共库里，并显示为散装 Skill。
+                {t('settings.skills.bundleDialog.dissolveConfirm', { name: bundleDialog.bundle.name })}
               </p>
             ) : (
               <label className={styles['skill-bundle-dialog-field']}>
-                <span>Bundle 名字</span>
+                <span>{t('settings.skills.bundleDialog.bundleNameLabel')}</span>
                 <input
                   value={bundleDialog.name}
                   autoFocus
@@ -632,14 +710,14 @@ export function SkillsTab() {
             )}
             <div className={styles['skill-bundle-dialog-actions']}>
               <button type="button" onClick={() => setBundleDialog(null)}>
-                取消
+                {t('settings.skills.bundleDialog.cancelBtn')}
               </button>
               <button type="submit" className={styles['skill-bundle-dialog-primary']}>
                 {bundleDialog.type === 'create'
-                  ? '创建'
+                  ? t('settings.skills.bundleDialog.createBtn')
                   : bundleDialog.type === 'rename'
-                    ? '保存'
-                    : '打散'}
+                    ? t('settings.skills.bundleDialog.saveBtn')
+                    : t('settings.skills.bundleDialog.dissolveBtn')}
               </button>
             </div>
           </form>

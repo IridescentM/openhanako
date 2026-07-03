@@ -22,6 +22,28 @@ function getErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+interface SkillPreviewSource {
+  skillName?: unknown;
+  baseDir?: unknown;
+  filePath?: unknown;
+  installed?: unknown;
+}
+
+function nonEmptyString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function inferSkillBaseDir(filePath: string): string {
+  const normalized = filePath.trim().replace(/[\\/]+$/, '');
+  const lastSeparator = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
+  if (lastSeparator < 0) return '';
+
+  const fileName = normalized.slice(lastSeparator + 1).toLowerCase();
+  if (fileName !== 'skill.md') return '';
+
+  return lastSeparator === 0 ? normalized.slice(0, 1) : normalized.slice(0, lastSeparator);
+}
+
 /**
  * 打开文件预览：读取文件内容 → 创建 PreviewItem → 打开预览面板
  *
@@ -38,12 +60,14 @@ export async function openFilePreview(
     messageId?: string;
     fileId?: string;
     blockIdx?: number;
+    sourceRootPath?: string;
   },
 ): Promise<void> {
   const fileName = label || filePath.split('/').pop() || filePath;
+  const normalizedExt = ext.replace(/^\./, '').toLowerCase();
 
   try {
-    if (ext === 'skill') {
+    if (normalizedExt === 'skill') {
       // .skill 文件可能是纯文本也可能是 zip，先尝试读取内容在预览面板展示
       const name = fileName.replace(/\.skill$/, '');
       const content = await window.platform?.readFile?.(filePath);
@@ -64,10 +88,10 @@ export async function openFilePreview(
     }
 
     // Media 类型（image / svg / video）分流到 MediaViewer，不经过 Preview 面板。
-    const mediaKind = inferKindByExt(ext);
+    const mediaKind = inferKindByExt(normalizedExt);
     if (isMediaKind(mediaKind)) {
       openMediaViewerFromContext({
-        ext,
+        ext: normalizedExt,
         filePath,
         label: fileName,
         kind: mediaKind,
@@ -80,20 +104,22 @@ export async function openFilePreview(
       return;
     }
 
-    const canPreview = ext in PREVIEWABLE_EXTS;
+    const canPreview = normalizedExt in PREVIEWABLE_EXTS;
     if (canPreview) {
-      const readResult = await readFileForPreviewWithVersion(filePath, ext);
+      const readResult = await readFileForPreviewWithVersion(filePath, normalizedExt);
       if (readResult != null) {
-        const previewType = PREVIEWABLE_EXTS[ext];
+        const previewType = PREVIEWABLE_EXTS[normalizedExt];
         const previewItem: PreviewItem = {
           id: `file-${filePath}`,
           type: previewType,
           title: fileName,
           content: readResult.content,
           filePath,
-          ext,
+          ext: normalizedExt,
+          sourceUrl: readResult.sourceUrl,
+          sourceRootPath: context?.sourceRootPath,
           fileVersion: readResult.fileVersion,
-          language: previewType === 'code' ? ext : undefined,
+          language: previewType === 'code' ? normalizedExt : undefined,
         };
         openPreview(previewItem);
         return;
@@ -107,7 +133,7 @@ export async function openFilePreview(
       title: fileName,
       content: '',
       filePath,
-      ext,
+      ext: normalizedExt,
     };
     openPreview(previewItem);
   } catch (err) {
@@ -117,21 +143,34 @@ export async function openFilePreview(
 }
 
 /**
- * 打开 Skill 预览：读取 skill 文件 → 创建 markdown PreviewItem → 打开预览面板
+ * 打开 Skill 预览：交给既有 Skill Viewer overlay，避免把 SKILL.md 当普通 markdown tab。
  */
-export async function openSkillPreview(skillName: string, skillFilePath: string): Promise<void> {
+export async function openSkillPreview(
+  skillName: string,
+  skillFilePath: string,
+  source?: SkillPreviewSource | null,
+): Promise<void> {
   try {
-    const content = await window.platform?.readFile?.(skillFilePath);
-    if (content != null) {
-      const body = content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '');
-      const previewItem: PreviewItem = {
-        id: `skill-${skillName}`,
-        type: 'markdown',
-        title: skillName,
-        content: body,
-      };
-      openPreview(previewItem);
+    const sourceFilePath = nonEmptyString(source?.filePath);
+    const filePath = sourceFilePath || nonEmptyString(skillFilePath);
+    const baseDir = nonEmptyString(source?.baseDir) || inferSkillBaseDir(filePath);
+
+    if (!baseDir) {
+      showError('skill preview path missing');
+      return;
     }
+
+    if (!window.platform?.openSkillViewer) {
+      showError('skill viewer unavailable');
+      return;
+    }
+
+    window.platform.openSkillViewer({
+      name: nonEmptyString(source?.skillName) || nonEmptyString(skillName) || 'Skill',
+      baseDir,
+      filePath: filePath || undefined,
+      installed: typeof source?.installed === 'boolean' ? source.installed : true,
+    });
   } catch (err) {
     console.error('[file-preview] open skill preview failed:', err);
     showError(getErrorMessage(err));

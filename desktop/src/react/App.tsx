@@ -15,7 +15,7 @@ const SkillViewerOverlay = lazy(() => import('./components/SkillViewerOverlay').
 import { ChannelsPanel } from './components/ChannelsPanel';
 import { ChannelCreateOverlay } from './components/channels/ChannelCreateOverlay';
 import { SidebarLayout, toggleSidebar } from './components/SidebarLayout';
-import { FloatPreviewCard, useFloatCard } from './components/FloatPreviewCard';
+import { FloatSidebar, useFloatSidebar } from './components/FloatSidebar';
 import { useSidebarResize } from './hooks/use-sidebar-resize';
 import { createNewSession } from './stores/session-actions';
 import { toggleJianSidebar } from './stores/desk-actions';
@@ -23,8 +23,8 @@ import { ToastContainer } from './components/ToastContainer';
 import { InputContextMenu } from './components/InputContextMenu';
 import { StatusBar } from './components/StatusBar';
 import { LeavesOverlay } from './components/LeavesOverlay';
+import { SelectionQuoteActionSurface } from './components/selection/SelectionQuoteActionSurface';
 import { MediaViewer } from './components/shared/MediaViewer/MediaViewer';
-import { SelectionFloatingInput } from './components/floating-input/SelectionFloatingInput';
 import { SettingsModalShell } from './components/SettingsModalShell';
 import { initTheme, initDragPrevention } from './bootstrap';
 import { initApp } from './app-init';
@@ -68,13 +68,20 @@ function App() {
   const jianOpen = useStore(s => s.jianOpen);
   const currentTab = useStore(s => s.currentTab);
   const isPluginTab = typeof currentTab === 'string' && currentTab.startsWith('plugin:');
-  const { floatCard, show: showFloat, scheduleHide: scheduleFloatHide, cancelHide: cancelFloatHide, hide: hideFloat } = useFloatCard();
+  const { side: floatSide, show: showFloat, scheduleHide: scheduleFloatHide, cancelHide: cancelFloatHide, hide: hideFloat } = useFloatSidebar();
 
   useEffect(() => {
-    initApp().catch((err: unknown) => {
-      console.error('[init] 初始化异常:', err);
-      window.platform?.appReady?.();
-    });
+    console.info('[hana-launch] init-start');
+    initApp()
+      .then(() => {
+        console.info('[hana-launch] init-finished');
+      })
+      .catch((err: unknown) => {
+        console.error('[init] 初始化异常:', err);
+        console.error('[hana-launch] init-failed', err);
+        console.info('[hana-launch] app-ready', JSON.stringify({ reason: 'init-failed' }));
+        window.platform?.appReady?.();
+      });
   }, []);
 
   return (
@@ -83,30 +90,34 @@ function App() {
       <SidebarLayout />
       <ChannelsPanel />
 
-      {/* ── Titlebar ── */}
-      <AppTitlebar
-        sidebarOpen={sidebarOpen}
-        jianOpen={jianOpen}
-        onToggleSidebar={() => { hideFloat(); toggleSidebar(); }}
-        onToggleJian={() => { hideFloat(); toggleJianSidebar(); }}
-        onLeftMouseEnter={(e) => showFloat('left', e.currentTarget)}
-        onRightMouseEnter={(e) => showFloat('right', e.currentTarget)}
-        onToggleMouseLeave={scheduleFloatHide}
-      />
-
-      {/* ── App body ── */}
-      <div className="app">
-        <ChatSidebar
-          open={sidebarOpen && !isPluginTab}
-          onNewSession={createNewSession}
-          onCollapse={() => toggleSidebar()}
-          onOpenSettings={() => openSettingsModal()}
-          onTogglePanel={togglePanel}
+      {/* ── App shell: titlebar 作为独立布局行（flex column 第一行），
+           app body 占剩余高度。取代旧的 fixed overlay + 各内容区 padding-top 避让。 ── */}
+      <div className="app-shell">
+        {/* ── Titlebar ── */}
+        <AppTitlebar
+          sidebarOpen={sidebarOpen}
+          jianOpen={jianOpen}
+          onToggleSidebar={() => { hideFloat(); toggleSidebar(); }}
+          onToggleJian={() => { hideFloat(); toggleJianSidebar(); }}
+          onLeftMouseEnter={() => showFloat('left')}
+          onRightMouseEnter={() => showFloat('right')}
+          onToggleMouseLeave={scheduleFloatHide}
         />
 
-        <RegionalErrorBoundary region="app-pages" resetKeys={[currentTab]}>
-          <AppPages />
-        </RegionalErrorBoundary>
+        {/* ── App body ── */}
+        <div className="app">
+          <ChatSidebar
+            open={sidebarOpen && !isPluginTab}
+            onNewSession={createNewSession}
+            onCollapse={() => toggleSidebar()}
+            onOpenSettings={() => openSettingsModal()}
+            onTogglePanel={togglePanel}
+          />
+
+          <RegionalErrorBoundary region="app-pages" resetKeys={[currentTab]}>
+            <AppPages />
+          </RegionalErrorBoundary>
+        </div>
       </div>
 
       {/* Connection status */}
@@ -118,15 +129,13 @@ function App() {
       {/* Skill viewer overlay */}
       <Suspense fallback={null}><SkillViewerOverlay /></Suspense>
 
-      {/* Float preview card */}
-      {floatCard && (
-        <FloatPreviewCard
-          state={floatCard}
-          onMouseEnter={cancelFloatHide}
-          onMouseLeave={scheduleFloatHide}
-          onAction={hideFloat}
-        />
-      )}
+      {/* Float sidebar */}
+      <FloatSidebar
+        side={floatSide}
+        onMouseEnter={cancelFloatHide}
+        onMouseLeave={scheduleFloatHide}
+        onAction={hideFloat}
+      />
 
       {/* Connection status bar */}
       <StatusBar />
@@ -137,14 +146,14 @@ function App() {
       {/* Media viewer overlay */}
       <MediaViewer />
 
-      {/* Selection floating input */}
-      <SelectionFloatingInput />
-
       {/* In-window settings overlay */}
       <SettingsModalShell />
 
       {/* Input context menu (cut/copy/paste) */}
       <InputContextMenu />
+
+      {/* Selection quote action */}
+      <SelectionQuoteActionSurface />
 
       {/* Toast notifications */}
       <ToastContainer />

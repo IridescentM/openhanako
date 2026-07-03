@@ -16,41 +16,46 @@ export const XING_PROMPT = isZh
   ? `回顾本次对话中我（用户）发送的消息，提取可复用的工作流程、纠正和操作经验。
 
 不要把用户的个人画像、审美喜好、兴趣、生活近况写进技能；这些属于记忆系统。
-只把“以后遇到类似任务应该怎么做”的内容写成自学技能。
+只把“以后遇到类似任务应该怎么做”的内容写成通用技能。
 
 你必须先查阅 skill-creator 技能，按照其中 "Capture Intent" 和 "Write the SKILL.md" 部分的流程操作。
 只做到创建并安装为止，不需要做 eval、benchmark 或 description optimization。
 
-最终调用 install_skill 工具将技能安装为自学技能（skill_content + skill_name 模式）。`
+最终产物必须是完整 skill package：包含 SKILL.md，且 references/scripts/assets 等配套资源必须保留在同一个 skill 目录里。不要调用 install_skill 传 skill_content；模型侧 install_skill 只接受 GitHub 仓库等完整包来源。如果本轮生成的是本地 skill，请先把完整目录写到工作区并说明需要通过技能管理导入该目录或 zip，不能把单个 SKILL.md 冒充成完整安装。`
   : `Review the messages I (the user) sent in this session and extract reusable workflows, corrections, and operational lessons.
 
 Do not write the user's personal profile, aesthetic tastes, interests, or life/current-state context into a skill; those belong in memory.
-Only turn "how to handle similar tasks in the future" into a learned skill.
+Only turn "how to handle similar tasks in the future" into a reusable skill.
 
 You must first consult the skill-creator skill, following its "Capture Intent" and "Write the SKILL.md" sections.
 Only go as far as creating and installing — do not run evals, benchmarks, or description optimization.
 
-Use the install_skill tool to install the skill as a learned skill (skill_content + skill_name mode).`;
+The final artifact must be a complete skill package: it must contain SKILL.md, and references/scripts/assets must stay in the same skill directory when needed. Do not call install_skill with skill_content; the model-facing install_skill tool only accepts complete package sources such as GitHub repositories. If this session creates a local skill, write the complete directory into the workspace and explain that the user should import that directory or zip through skill management; never treat a single SKILL.md as a complete install.`;
 
 // ── Slash Command Interface ──
 
 export interface SlashItem {
   name: string;
+  aliases?: string[];
   label: string;
   description: string;
   busyLabel: string;
   icon: string;
-  type: 'builtin' | 'skill';
-  execute: () => Promise<void> | void;
+  type: 'builtin' | 'skill' | 'server-command';
+  execute: (inputText?: string) => Promise<void> | void;
 }
 
 export const MAX_SLASH_TRIGGER_LENGTH = 20;
 
 export function getSlashMatches(text: string, commands: SlashItem[]): SlashItem[] {
   const normalized = text.trim();
-  if (!normalized.startsWith('/') || normalized.length > MAX_SLASH_TRIGGER_LENGTH) return [];
-  const query = normalized.slice(1).toLowerCase();
-  return commands.filter(command => command.name.startsWith(query));
+  if (!normalized.startsWith('/')) return [];
+  const query = normalized.slice(1).split(/\s+/, 1)[0].toLowerCase();
+  if (query.length > MAX_SLASH_TRIGGER_LENGTH) return [];
+  return commands.filter(command => {
+    if (command.name.startsWith(query)) return true;
+    return (command.aliases || []).some(alias => alias.toLowerCase().startsWith(query));
+  });
 }
 
 export function resolveSlashSubmitSelection({
@@ -70,7 +75,11 @@ export function resolveSlashSubmitSelection({
   const matches = getSlashMatches(text, commands);
   if (matches.length === 0) return null;
   if (dismissedText === text.trim()) return null;
-  return matches[selectedIndex] || matches[0] || null;
+  const selected = matches[selectedIndex] || matches[0] || null;
+  if (!selected) return null;
+  const hasArgs = /\s/.test(text.trim().slice(1));
+  if (hasArgs && selected.type !== 'server-command') return null;
+  return selected;
 }
 
 // ── Command Executors ──
@@ -163,17 +172,20 @@ export function executeSlashViaWs(
   setBusy: (name: string | null) => void,
   setInput: (text: string) => void,
   setMenuOpen: (open: boolean) => void,
-): () => Promise<void> {
-  return async () => {
+): (inputText?: string) => Promise<void> {
+  return async (inputText?: string) => {
     setBusy(cmd);
     setInput('');
     setMenuOpen(false);
+    const rawText = typeof inputText === 'string' && inputText.trim().startsWith('/')
+      ? inputText.trim()
+      : `/${cmd}`;
     try {
       const ws = getWebSocket();
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
           type: 'slash',
-          text: '/' + cmd,
+          text: rawText,
           sessionPath: useStore.getState().currentSessionPath,
         }));
       }

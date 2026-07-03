@@ -6,6 +6,7 @@ import React from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ServerConnection } from '../../services/server-connection';
 
 interface MockState extends Record<string, unknown> {
   activeTab?: string;
@@ -32,6 +33,7 @@ vi.mock('../../settings/actions', () => ({
   loadAgents: vi.fn(async () => {}),
   loadAvatars: vi.fn(async () => {}),
   loadSettingsConfig: vi.fn(async () => {}),
+  loadSettingsSnapshot: vi.fn(async () => {}),
   loadPluginSettings: vi.fn(async () => {}),
 }));
 
@@ -64,8 +66,8 @@ vi.mock('../../components/InputContextMenu', () => ({ InputContextMenu: () => nu
 vi.mock('../../settings/tabs/AgentTab', () => ({ AgentTab: () => <div data-testid="active-tab">agent tab</div> }));
 vi.mock('../../settings/tabs/MeTab', () => ({ MeTab: () => <div data-testid="active-tab">me tab</div> }));
 vi.mock('../../settings/tabs/InterfaceTab', () => ({ InterfaceTab: () => <div data-testid="active-tab">interface tab</div> }));
+vi.mock('../../settings/tabs/GeneralTab', () => ({ GeneralTab: () => <div data-testid="active-tab">general tab</div> }));
 vi.mock('../../settings/tabs/WorkTab', () => ({ WorkTab: () => <div data-testid="active-tab">work tab</div> }));
-vi.mock('../../settings/tabs/ComputerUseTab', () => ({ ComputerUseTab: () => <div data-testid="active-tab">computer tab</div> }));
 vi.mock('../../settings/tabs/SkillsTab', () => ({ SkillsTab: () => <div data-testid="active-tab">skills tab</div> }));
 vi.mock('../../settings/tabs/BridgeTab', () => ({ BridgeTab: () => <div data-testid="active-tab">bridge tab</div> }));
 vi.mock('../../settings/tabs/ProvidersTab', () => ({ ProvidersTab: () => <div data-testid="active-tab">providers tab</div> }));
@@ -75,6 +77,7 @@ vi.mock('../../settings/tabs/PluginsTab', () => ({ PluginsTab: () => <div data-t
 vi.mock('../../settings/tabs/SecurityTab', () => ({ SecurityTab: () => <div data-testid="active-tab">security tab</div> }));
 vi.mock('../../settings/tabs/SharingTab', () => ({ SharingTab: () => <div data-testid="active-tab">sharing tab</div> }));
 vi.mock('../../settings/tabs/AccessTab', () => ({ AccessTab: () => <div data-testid="active-tab">access tab</div> }));
+vi.mock('../../settings/tabs/ExperimentsTab', () => ({ ExperimentsTab: () => <div data-testid="active-tab">experiments tab</div> }));
 
 function resetState() {
   Object.keys(mockState).forEach(key => delete mockState[key]);
@@ -92,6 +95,7 @@ function jsonResponse(body: unknown): Response {
 describe('SettingsContent title placement', () => {
   beforeEach(() => {
     resetState();
+    window.localStorage.clear();
     mockHanaFetch.mockReset();
     mockHanaFetch.mockResolvedValue(jsonResponse({ locale: 'zh-CN' }));
     window.platform = {
@@ -106,6 +110,7 @@ describe('SettingsContent title placement', () => {
 
   afterEach(() => {
     cleanup();
+    window.localStorage.clear();
     vi.clearAllTimers();
   });
 
@@ -116,8 +121,8 @@ describe('SettingsContent title placement', () => {
     const header = container.querySelector('.settings-header');
     expect(header).not.toBeNull();
     expect(within(header as HTMLElement).getByRole('heading', { name: '设置' })).toBeInTheDocument();
-    expect(within(header as HTMLElement).getByRole('heading', { name: '助手' })).toBeInTheDocument();
-    expect(screen.getAllByRole('heading', { name: '助手' })).toHaveLength(1);
+    expect(within(header as HTMLElement).getByRole('heading', { name: 'settings.tabs.agent' })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { name: 'settings.tabs.agent' })).toHaveLength(1);
   });
 
   it('keeps the tab title in the content area for the standalone settings window', async () => {
@@ -126,8 +131,8 @@ describe('SettingsContent title placement', () => {
 
     const header = container.querySelector('.settings-header');
     expect(header).not.toBeNull();
-    expect(within(header as HTMLElement).queryByRole('heading', { name: '助手' })).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '助手' })).toBeInTheDocument();
+    expect(within(header as HTMLElement).queryByRole('heading', { name: 'settings.tabs.agent' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'settings.tabs.agent' })).toBeInTheDocument();
   });
 
   it('notifies the modal shell when the active settings tab changes', async () => {
@@ -135,19 +140,23 @@ describe('SettingsContent title placement', () => {
     const { SettingsContent } = await import('../../settings/SettingsContent');
     render(<SettingsContent variant="modal" onClose={() => {}} onActiveTabChange={onActiveTabChange} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'settings.tabs.computer' }));
+    fireEvent.click(screen.getByRole('button', { name: 'settings.tabs.experiments' }));
 
     expect(onActiveTabChange).toHaveBeenCalledTimes(1);
-    expect(onActiveTabChange).toHaveBeenCalledWith('computer');
+    expect(onActiveTabChange).toHaveBeenCalledWith('experiments');
   });
 
   it('does not echo the initially rendered tab back to the modal shell', async () => {
     const onActiveTabChange = vi.fn();
+    const actions = await import('../../settings/actions');
     const { SettingsContent } = await import('../../settings/SettingsContent');
     render(<SettingsContent variant="modal" onClose={() => {}} onActiveTabChange={onActiveTabChange} />);
 
     await waitFor(() => {
       expect(mockHanaFetch).toHaveBeenCalledWith('/api/config');
+    });
+    await waitFor(() => {
+      expect(actions.loadSettingsSnapshot).toHaveBeenCalled();
     });
     expect(onActiveTabChange).not.toHaveBeenCalled();
   });
@@ -157,7 +166,7 @@ describe('SettingsContent title placement', () => {
     const { SettingsContent } = await import('../../settings/SettingsContent');
     render(<SettingsContent variant="window" />);
 
-    expect(screen.getByRole('heading', { name: '插件市场' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'settings.tabs.pluginMarketplace' })).toBeInTheDocument();
     expect(screen.queryByText('agent tab')).not.toBeInTheDocument();
   });
 
@@ -175,14 +184,13 @@ describe('SettingsContent title placement', () => {
     });
   });
 
-  it('hides the Computer Use tab on Linux and redirects stale computer tabs', async () => {
+  it('does not render a Computer Use tab and redirects stale computer tabs to experiments', async () => {
     mockState.activeTab = 'computer';
-    mockState.platformName = 'linux';
     const { SettingsContent } = await import('../../settings/SettingsContent');
     render(<SettingsContent variant="modal" onClose={() => {}} />);
 
     expect(screen.queryByRole('button', { name: 'settings.tabs.computer' })).not.toBeInTheDocument();
-    expect(mockState.set).toHaveBeenCalledWith({ activeTab: 'agent' });
+    expect(mockState.set).toHaveBeenCalledWith({ activeTab: 'experiments' });
   });
 
   it('keeps activeServerConnection in sync when the settings window hears server restart', async () => {
@@ -217,5 +225,92 @@ describe('SettingsContent title placement', () => {
       wsUrl: 'ws://127.0.0.1:63000',
       token: 'token',
     }));
+  });
+
+  it('keeps the persisted remote Studio active instead of forcing settings back to local loopback', async () => {
+    const { writePersistedServerConnectionState } = await import('../../services/server-connection');
+    const remoteConnection: ServerConnection = {
+      connectionId: 'lan:node_lan:studio_lan',
+      kind: 'lan',
+      serverId: 'server_lan',
+      serverNodeId: 'node_lan',
+      userId: 'user_lan',
+      studioId: 'studio_lan',
+      label: 'LAN Studio',
+      baseUrl: 'http://192.168.31.75:14500',
+      wsUrl: 'ws://192.168.31.75:14500',
+      token: 'hana_dev_remote',
+      authState: 'paired',
+      trustState: 'lan',
+      credentialKind: 'device_credential',
+      platformAccountId: null,
+      officialServiceKind: null,
+      capabilities: ['chat', 'resources', 'files', 'studio.owner', 'settings'],
+    };
+    writePersistedServerConnectionState({
+      serverConnections: { [remoteConnection.connectionId]: remoteConnection },
+      activeServerConnectionId: remoteConnection.connectionId,
+    });
+    window.platform = {
+      getServerPort: vi.fn(async () => 62950),
+      getServerToken: vi.fn(async () => 'local-token'),
+    } as unknown as typeof window.platform;
+    const { SettingsContent } = await import('../../settings/SettingsContent');
+
+    render(<SettingsContent variant="window" />);
+
+    await waitFor(() => {
+      expect(mockState.activeServerConnection).toEqual(expect.objectContaining({
+        connectionId: remoteConnection.connectionId,
+        baseUrl: 'http://192.168.31.75:14500',
+        token: 'hana_dev_remote',
+      }));
+    });
+    expect(mockState.serverConnections).toEqual(expect.objectContaining({
+      local: expect.objectContaining({ baseUrl: 'http://127.0.0.1:62950' }),
+      [remoteConnection.connectionId]: remoteConnection,
+    }));
+  });
+
+  it('opens settings against a persisted remote Studio when no local platform server APIs exist', async () => {
+    const { writePersistedServerConnectionState } = await import('../../services/server-connection');
+    const remoteConnection: ServerConnection = {
+      connectionId: 'browser:server_remote',
+      kind: 'custom_remote',
+      serverId: 'server_remote',
+      serverNodeId: 'node_remote',
+      userId: 'user_remote',
+      studioId: 'studio_remote',
+      label: 'Remote Studio',
+      baseUrl: 'https://studio.example.test',
+      wsUrl: 'wss://studio.example.test',
+      token: null,
+      authState: 'user',
+      trustState: 'tunnel',
+      credentialKind: 'user_session',
+      platformAccountId: null,
+      officialServiceKind: null,
+      capabilities: ['chat', 'resources', 'files', 'studio.owner', 'settings'],
+    };
+    writePersistedServerConnectionState({
+      serverConnections: { [remoteConnection.connectionId]: remoteConnection },
+      activeServerConnectionId: remoteConnection.connectionId,
+    });
+    window.platform = {} as typeof window.platform;
+    const { SettingsContent } = await import('../../settings/SettingsContent');
+
+    render(<SettingsContent variant="window" />);
+
+    await waitFor(() => {
+      expect(mockState.activeServerConnection).toEqual(expect.objectContaining({
+        connectionId: remoteConnection.connectionId,
+        baseUrl: 'https://studio.example.test',
+      }));
+    });
+    expect(mockState.serverPort).toBeNull();
+    expect(mockState.serverToken).toBeNull();
+    expect(mockState.serverConnections).toEqual({
+      [remoteConnection.connectionId]: remoteConnection,
+    });
   });
 });

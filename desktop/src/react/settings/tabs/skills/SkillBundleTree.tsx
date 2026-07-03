@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import type { SkillInfo } from '../../store';
+import { t } from '../../helpers';
 import { SkillRow } from './SkillRow';
 import styles from '../../Settings.module.css';
 
@@ -36,6 +37,10 @@ interface SkillBundleTreeProps {
   onReorderBundles?: (bundleIds: string[]) => void;
   onMoveSkillToBundle?: (skillName: string, bundle: SkillBundleInfo, index?: number) => void;
   onRemoveSkillFromBundles?: (skillName: string) => void;
+  highlightedSkillName?: string | null;
+  highlightedBundleId?: string | null;
+  expandedState?: Record<string, boolean>;
+  onExpandedStateChange?: (next: Record<string, boolean>) => void;
 }
 
 function skillDragType() {
@@ -75,6 +80,22 @@ function bundleEnabledState(bundle: SkillBundleInfo, skillByName: Map<string, Sk
   };
 }
 
+function skillConfigurable(skill: SkillInfo) {
+  if (skill.configurable === false) return false;
+  if (skill.readonly) return false;
+  if (skill.source === 'workspace') return false;
+  if (skill.managedBy === 'workspace' || skill.managedBy === 'plugin') return false;
+  return true;
+}
+
+function skillDeletable(skill: SkillInfo) {
+  if (skill.deletable === false) return false;
+  if (skill.readonly) return false;
+  if (skill.source === 'workspace') return false;
+  if (skill.managedBy === 'workspace' || skill.managedBy === 'plugin') return false;
+  return true;
+}
+
 export function SkillBundleTree({
   mode,
   bundles,
@@ -91,8 +112,21 @@ export function SkillBundleTree({
   onReorderBundles,
   onMoveSkillToBundle,
   onRemoveSkillFromBundles,
+  highlightedSkillName,
+  highlightedBundleId,
+  expandedState,
+  onExpandedStateChange,
 }: SkillBundleTreeProps) {
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [internalExpanded, setInternalExpanded] = useState<Record<string, boolean>>({});
+  const expanded = expandedState ?? internalExpanded;
+  const setBundleExpanded = useCallback((bundleId: string, nextExpanded: boolean) => {
+    const next = { ...expanded, [bundleId]: nextExpanded };
+    if (expandedState) {
+      onExpandedStateChange?.(next);
+    } else {
+      setInternalExpanded(next);
+    }
+  }, [expanded, expandedState, onExpandedStateChange]);
   const skillByName = useMemo(() => new Map(skills.map(skill => [skill.name, skill])), [skills]);
   const bundledNames = useMemo(() => new Set(bundles.flatMap(bundle => bundle.skillNames)), [bundles]);
   const looseSkills = skills.filter(skill => !bundledNames.has(skill.name));
@@ -155,14 +189,14 @@ export function SkillBundleTree({
           <button
             className={styles['skill-bundle-create']}
             type="button"
-            title="新建 Skill Bundle"
-            aria-label="新建 Skill Bundle"
+            title={t('settings.skills.createBundleTitle')}
+            aria-label={t('settings.skills.createBundleAriaLabel')}
             onClick={onCreateBundle}
           >
-            新建 Bundle
+            {t('settings.skills.createBundleBtn')}
           </button>
         ) : null}
-        <p className={styles['agent-skill-empty']} style={{ padding: 'var(--space-md)', margin: 0 }}>
+        <p className={styles['agent-skill-empty']} style={{ padding: 'var(--space-16)', margin: 0 }}>
           {emptyText}
         </p>
       </div>
@@ -176,11 +210,11 @@ export function SkillBundleTree({
           <button
             className={styles['skill-bundle-create']}
             type="button"
-            title="新建 Skill Bundle"
-            aria-label="新建 Skill Bundle"
+            title={t('settings.skills.createBundleTitle')}
+            aria-label={t('settings.skills.createBundleAriaLabel')}
             onClick={onCreateBundle}
           >
-            新建 Bundle
+            {t('settings.skills.createBundleBtn')}
           </button>
         </div>
       ) : null}
@@ -192,7 +226,8 @@ export function SkillBundleTree({
           return (
             <div className={styles['skill-bundle-group']} key={bundle.id}>
               <div
-                className={styles['skill-bundle-header']}
+                className={`${styles['skill-bundle-header']}${highlightedBundleId === bundle.id ? ` ${styles['skill-bundle-highlight']}` : ''}`}
+                data-highlighted-bundle={highlightedBundleId === bundle.id ? bundle.id : undefined}
                 data-testid={`skill-bundle-header-${bundle.id}`}
                 draggable={canManage}
                 onDragStart={(event) => startBundleDrag(event, bundle.id)}
@@ -202,9 +237,9 @@ export function SkillBundleTree({
                 <button
                   className={styles['skill-bundle-caret']}
                   type="button"
-                  aria-label={isExpanded ? '收起 Bundle' : '展开 Bundle'}
-                  title={isExpanded ? '收起 Bundle' : '展开 Bundle'}
-                  onClick={() => setExpanded(prev => ({ ...prev, [bundle.id]: !isExpanded }))}
+                  aria-label={isExpanded ? t('settings.skills.collapseBundleAriaLabel') : t('settings.skills.expandBundleAriaLabel')}
+                  title={isExpanded ? t('settings.skills.collapseBundleAriaLabel') : t('settings.skills.expandBundleAriaLabel')}
+                  onClick={() => setBundleExpanded(bundle.id, !isExpanded)}
                 >
                   {isExpanded ? '⌄' : '›'}
                 </button>
@@ -218,8 +253,8 @@ export function SkillBundleTree({
                       data-testid={`skill-bundle-toggle-${bundle.id}`}
                       className={`hana-toggle mini${state.all ? ' on' : ''}${state.partial ? ' bundle-mixed' : ''}`}
                       type="button"
-                      title={state.next ? '启用整个 Bundle' : '关闭整个 Bundle'}
-                      aria-label={state.next ? `启用 ${bundle.name}` : `关闭 ${bundle.name}`}
+                      title={state.next ? t('settings.skills.enableBundleTitle') : t('settings.skills.disableBundleTitle')}
+                      aria-label={state.next ? t('settings.skills.enableBundleAriaLabel', { name: bundle.name }) : t('settings.skills.disableBundleAriaLabel', { name: bundle.name })}
                       onClick={() => onToggleBundle(bundle, state.next)}
                     />
                   ) : null}
@@ -227,8 +262,8 @@ export function SkillBundleTree({
                     <button
                       className={styles['skill-bundle-icon-button']}
                       type="button"
-                      title="重命名 Bundle"
-                      aria-label={`重命名 ${bundle.name}`}
+                      title={t('settings.skills.renameBundleTitle')}
+                      aria-label={t('settings.skills.renameBundleAriaLabel', { name: bundle.name })}
                       onClick={() => onRenameBundle(bundle)}
                     >
                       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
@@ -241,8 +276,8 @@ export function SkillBundleTree({
                     <button
                       className={styles['skill-bundle-icon-button']}
                       type="button"
-                      title="导出 Skill Bundle"
-                      aria-label={`导出 ${bundle.name}`}
+                      title={t('settings.skills.exportBundleTitle')}
+                      aria-label={t('settings.skills.exportBundleAriaLabel', { name: bundle.name })}
                       onClick={() => onExportBundle(bundle)}
                     >
                       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
@@ -256,8 +291,8 @@ export function SkillBundleTree({
                     <button
                       className={styles['skill-card-delete']}
                       type="button"
-                      title="打散 Bundle"
-                      aria-label={`打散 ${bundle.name}`}
+                      title={t('settings.skills.dissolveBundleTitle')}
+                      aria-label={t('settings.skills.dissolveBundleAriaLabel', { name: bundle.name })}
                       onClick={() => onDeleteBundle(bundle)}
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -270,11 +305,11 @@ export function SkillBundleTree({
               {isExpanded ? (
                 <div className={styles['skill-bundle-children']}>
                   {bundle.skillNames.length === 0 ? (
-                    <div className={styles['skill-bundle-empty']}>空 Bundle</div>
+                    <div className={styles['skill-bundle-empty']}>{t('settings.skills.emptyBundle')}</div>
                   ) : bundle.skillNames.map((skillName, index) => {
                     const skill = skillByName.get(skillName) || {
                       name: skillName,
-                      description: '这个 Skill 已不存在',
+                      description: t('settings.skills.skillNotFound'),
                       enabled: false,
                       source: 'missing',
                     };
@@ -283,20 +318,21 @@ export function SkillBundleTree({
                         key={`${bundle.id}:${skillName}`}
                         skill={skill}
                         nameHint={nameHints[skillName]}
-                        deletable={canManage}
-                        draggable={canManage}
-                        onDragStart={startSkillDrag}
-                        onDelete={canManage ? onDeleteSkill : undefined}
-                        onToggle={mode === 'agent' ? onToggleSkill : undefined}
+                        deletable={canManage && skillDeletable(skill)}
+                        draggable={canManage && skillDeletable(skill)}
+                        onDragStart={canManage && skillDeletable(skill) ? startSkillDrag : undefined}
+                        onDelete={canManage && skillDeletable(skill) ? onDeleteSkill : undefined}
+                        onToggle={mode === 'agent' && skillConfigurable(skill) ? onToggleSkill : undefined}
                         onDragOver={(event) => { if (canManage) event.preventDefault(); }}
                         onDrop={(event) => dropOnBundle(event, bundle, index)}
-                        className={styles['skill-bundle-child-row']}
+                        className={`${styles['skill-bundle-child-row']}${highlightedSkillName === skillName ? ` ${styles['skill-install-highlight']}` : ''}`}
+                        highlighted={highlightedSkillName === skillName}
                         extraActions={canManage ? (
                           <button
                             className={styles['skill-bundle-icon-button']}
                             type="button"
-                            title="移出 Bundle，变为散装 Skill"
-                            aria-label={`将 ${skillName} 移出 Bundle`}
+                            title={t('settings.skills.removeFromBundleTitle')}
+                            aria-label={t('settings.skills.removeFromBundleAriaLabel', { name: skillName })}
                             onClick={(event) => {
                               event.stopPropagation();
                               onRemoveSkillFromBundles?.(skillName);
@@ -324,15 +360,17 @@ export function SkillBundleTree({
               key={skill.name}
               skill={skill}
               nameHint={nameHints[skill.name]}
-              deletable={canManage}
-              draggable={canManage}
-              onDragStart={startSkillDrag}
-              onDelete={canManage ? onDeleteSkill : undefined}
-              onToggle={mode === 'agent' ? onToggleSkill : undefined}
+              deletable={canManage && skillDeletable(skill)}
+              draggable={canManage && skillDeletable(skill)}
+              onDragStart={canManage && skillDeletable(skill) ? startSkillDrag : undefined}
+              onDelete={canManage && skillDeletable(skill) ? onDeleteSkill : undefined}
+              onToggle={mode === 'agent' && skillConfigurable(skill) ? onToggleSkill : undefined}
+              className={highlightedSkillName === skill.name ? styles['skill-install-highlight'] : ''}
+              highlighted={highlightedSkillName === skill.name}
             />
           ))}
           {looseSkills.length === 0 ? (
-            <div className={styles['skill-bundle-empty']}>没有散装 Skill</div>
+            <div className={styles['skill-bundle-empty']}>{t('settings.skills.noLooseSkills')}</div>
           ) : null}
         </div>
       </div>

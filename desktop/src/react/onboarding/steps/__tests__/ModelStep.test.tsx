@@ -87,6 +87,7 @@ describe('ModelStep', () => {
     expect(screen.getByLabelText('onboarding.model.contextLength')).toHaveValue('1000000');
     expect(screen.getByLabelText('onboarding.model.maxOutput')).toHaveValue('384000');
     expect(screen.getByLabelText('onboarding.model.imageInput')).not.toBeChecked();
+    expect(screen.getByLabelText('onboarding.model.audioInput')).not.toBeChecked();
     expect(screen.getByLabelText('onboarding.model.reasoning')).toBeChecked();
   });
 
@@ -120,5 +121,71 @@ describe('ModelStep', () => {
 
     expect(screen.getByText('custom-chat-model')).toBeInTheDocument();
     expect(screen.getByText('onboarding.model.mainModel')).toBeInTheDocument();
+  });
+
+  it('saves fetched model metadata when adding discovered custom provider models', async () => {
+    const goToStep = vi.fn();
+    mocks.loadModels.mockResolvedValueOnce({
+      models: [
+        {
+          id: 'custom-vllm-chat',
+          name: 'Custom vLLM Chat',
+          context: 32768,
+          maxOutput: 4096,
+          image: true,
+          video: true,
+          audio: true,
+          reasoning: true,
+        },
+      ],
+    });
+
+    render(
+      <ModelStep
+        preview={false}
+        hanaFetch={vi.fn()}
+        providerName="custom-vllm"
+        providerUrl="http://127.0.0.1:8000/v1"
+        providerApi="openai-completions"
+        apiKey="sk-test"
+        goToStep={goToStep}
+        showError={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(mocks.loadModels).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole('button', { name: 'onboarding.model.addModel' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'custom-vllm-chat' }));
+
+    const utilityTriggers = document.querySelectorAll('.ob-select-widget button[aria-haspopup="listbox"]');
+    fireEvent.click(utilityTriggers[0]);
+    fireEvent.click(await screen.findByRole('option', { name: 'Custom vLLM Chat' }));
+    fireEvent.click(utilityTriggers[1]);
+    fireEvent.click(await screen.findByRole('option', { name: 'Custom vLLM Chat' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'onboarding.model.next' }));
+
+    await waitFor(() => {
+      expect(mocks.saveModel).toHaveBeenCalledWith(expect.objectContaining({
+        providerName: 'custom-vllm',
+        selectedModel: 'custom-vllm-chat',
+        selectedUtility: 'custom-vllm-chat',
+        selectedUtilityLarge: 'custom-vllm-chat',
+        addedModels: [
+          {
+            id: 'custom-vllm-chat',
+            name: 'Custom vLLM Chat',
+            context: 32768,
+            maxOutput: 4096,
+            image: true,
+            video: true,
+            audio: true,
+            reasoning: true,
+          },
+        ],
+      }));
+    });
+    expect(goToStep).toHaveBeenCalledWith(4);
   });
 });

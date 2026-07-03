@@ -70,6 +70,37 @@ describe('AgentCardStack geometry', () => {
 });
 
 describe('AgentCardStack actions', () => {
+  it('lets the page own wheel scrolling while the stack is collapsed and captures horizontal stack scrolling only after expansion', () => {
+    render(React.createElement(AgentCardStack, {
+      agents,
+      selectedId: 'hana',
+      currentAgentId: 'hana',
+      onSelect: vi.fn(),
+      onAvatarClick: vi.fn(),
+      onSetPrimary: vi.fn(),
+      onDelete: vi.fn(),
+      onExport: vi.fn(),
+      onAdd: vi.fn(),
+    }));
+
+    const stack = screen.getByText('DeepSeek').closest('[class*="agent-cards"]') as HTMLElement;
+    expect(stack).not.toBeNull();
+    Object.defineProperty(stack, 'scrollWidth', { configurable: true, value: 900 });
+    Object.defineProperty(stack, 'clientWidth', { configurable: true, value: 260 });
+
+    const collapsedWheel = new WheelEvent('wheel', { deltaY: 48, cancelable: true });
+    stack.dispatchEvent(collapsedWheel);
+    expect(collapsedWheel.defaultPrevented).toBe(false);
+    expect(stack.scrollLeft).toBe(0);
+
+    fireEvent.pointerEnter(stack);
+
+    const expandedWheel = new WheelEvent('wheel', { deltaY: 48, cancelable: true });
+    stack.dispatchEvent(expandedWheel);
+    expect(expandedWheel.defaultPrevented).toBe(true);
+    expect(stack.scrollLeft).toBe(48);
+  });
+
   it('shows quiet actions below the selected non-primary agent and calls explicit targets', () => {
     const onSetPrimary = vi.fn();
     const onDelete = vi.fn();
@@ -88,7 +119,7 @@ describe('AgentCardStack actions', () => {
     }));
 
     fireEvent.click(screen.getByRole('button', { name: 'settings.agent.setPrimary' }));
-    fireEvent.click(screen.getByRole('button', { name: '导出助手' }));
+    fireEvent.click(screen.getByRole('button', { name: 'settings.agent.exportAgent' }));
     fireEvent.click(screen.getByRole('button', { name: 'settings.agent.deleteBtn' }));
 
     expect(onSetPrimary).toHaveBeenCalledWith('deepseek');
@@ -110,7 +141,7 @@ describe('AgentCardStack actions', () => {
     }));
 
     expect(screen.queryByRole('button', { name: 'settings.agent.setPrimary' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '导出助手' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'settings.agent.exportAgent' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'settings.agent.deleteBtn' })).not.toBeInTheDocument();
   });
 
@@ -133,5 +164,24 @@ describe('AgentCardStack actions', () => {
 
     expect(screen.queryByRole('button', { name: 'settings.agent.setPrimary' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'settings.agent.deleteBtn' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the delete action available for a selected non-primary agent that is also the current agent (#1301)', () => {
+    const onDelete = vi.fn();
+
+    render(React.createElement(AgentCardStack, {
+      agents,
+      selectedId: 'deepseek',
+      currentAgentId: 'deepseek', // 新建 agent 会被自动切为 current；删除不应因此被隐藏
+      onSelect: vi.fn(),
+      onAvatarClick: vi.fn(),
+      onSetPrimary: vi.fn(),
+      onDelete,
+      onExport: vi.fn(),
+      onAdd: vi.fn(),
+    }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'settings.agent.deleteBtn' }));
+    expect(onDelete).toHaveBeenCalledWith('deepseek');
   });
 });

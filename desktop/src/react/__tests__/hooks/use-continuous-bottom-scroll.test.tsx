@@ -136,6 +136,30 @@ describe('useContinuousBottomScroll', () => {
     expect(metrics.scrollTop).toBe(420);
   });
 
+  it('cancels an active follow when the user changes scrollTop through a scroll-only path', () => {
+    const metrics = { scrollHeight: 1000, clientHeight: 300, scrollTop: 700 };
+    render(<Harness onController={() => {}} />);
+    const scrollEl = document.querySelector('[data-testid="scroll"]') as HTMLElement;
+    setScrollMetrics(scrollEl, metrics);
+
+    act(() => {
+      metrics.scrollHeight = 1060;
+      MockResizeObserver.instances[0].trigger();
+      flushRaf(16);
+    });
+    expect(metrics.scrollTop).toBeGreaterThan(700);
+
+    act(() => {
+      metrics.scrollTop = 520;
+      fireEvent.scroll(scrollEl);
+      metrics.scrollHeight = 1120;
+      MockResizeObserver.instances[0].trigger();
+      flushRaf(32);
+    });
+
+    expect(metrics.scrollTop).toBe(520);
+  });
+
   it('can be explicitly marked sticky again and jump to bottom', () => {
     let controller: ContinuousBottomScrollController | null = null;
     const metrics = { scrollHeight: 1000, clientHeight: 300, scrollTop: 120 };
@@ -157,5 +181,98 @@ describe('useContinuousBottomScroll', () => {
     });
 
     expect(metrics.scrollTop).toBeGreaterThan(700);
+  });
+
+  it('snaps instantly (no animation) on the first content growth after arming an instant landing', () => {
+    let controller: ContinuousBottomScrollController | null = null;
+    const metrics = { scrollHeight: 1000, clientHeight: 300, scrollTop: 700 };
+    render(<Harness onController={(next) => { controller = next; }} />);
+    const scrollEl = document.querySelector('[data-testid="scroll"]') as HTMLElement;
+    setScrollMetrics(scrollEl, metrics);
+
+    // Simulate "switch to this session": arm instant landing, then content hydrates (grows).
+    act(() => {
+      controller?.armInstantLanding();
+      metrics.scrollHeight = 1400; // big hydrate growth while panel is visible
+      MockResizeObserver.instances[0].trigger();
+    });
+
+    // Must already be at the new bottom synchronously — no mid-position animated frame.
+    expect(metrics.scrollTop).toBe(1100);
+
+    // A flushed frame must not move it further (the arm did not start an animation loop).
+    act(() => {
+      flushRaf(16);
+    });
+    expect(metrics.scrollTop).toBe(1100);
+  });
+
+  it('resumes animated follow on growth after the armed instant landing was consumed', () => {
+    let controller: ContinuousBottomScrollController | null = null;
+    const metrics = { scrollHeight: 1000, clientHeight: 300, scrollTop: 700 };
+    render(<Harness onController={(next) => { controller = next; }} />);
+    const scrollEl = document.querySelector('[data-testid="scroll"]') as HTMLElement;
+    setScrollMetrics(scrollEl, metrics);
+
+    // First growth after arm = instant landing (consumes the arm).
+    act(() => {
+      controller?.armInstantLanding();
+      metrics.scrollHeight = 1100;
+      MockResizeObserver.instances[0].trigger();
+    });
+    expect(metrics.scrollTop).toBe(800);
+
+    // Subsequent growth (streaming append, delta under largeJumpPx) must animate again.
+    act(() => {
+      metrics.scrollHeight = 1160;
+      MockResizeObserver.instances[0].trigger();
+    });
+    expect(metrics.scrollTop).toBe(800); // not yet moved before a frame runs
+
+    act(() => {
+      flushRaf(16);
+    });
+    expect(metrics.scrollTop).toBeGreaterThan(800);
+    expect(metrics.scrollTop).toBeLessThan(860);
+  });
+
+  it('does not write non-finite scroll positions when DOM metrics are invalid', () => {
+    const metrics = { scrollHeight: Number.POSITIVE_INFINITY, clientHeight: 300, scrollTop: 700 };
+    render(<Harness onController={() => {}} />);
+    const scrollEl = document.querySelector('[data-testid="scroll"]') as HTMLElement;
+    setScrollMetrics(scrollEl, metrics);
+
+    act(() => {
+      MockResizeObserver.instances[0].trigger();
+      flushRaf(Number.POSITIVE_INFINITY);
+    });
+
+    expect(Number.isFinite(metrics.scrollTop)).toBe(true);
+  });
+
+  it('preserves the armed instant landing through a no-op follow (already at bottom)', () => {
+    let controller: ContinuousBottomScrollController | null = null;
+    const metrics = { scrollHeight: 1000, clientHeight: 300, scrollTop: 700 };
+    render(<Harness onController={(next) => { controller = next; }} />);
+    const scrollEl = document.querySelector('[data-testid="scroll"]') as HTMLElement;
+    setScrollMetrics(scrollEl, metrics);
+
+    // Arm, then a no-op follow (already at bottom, delta=0) must NOT consume the arm —
+    // the arm is reserved for the first meaningful growth (the async hydrate after a switch).
+    act(() => {
+      controller?.armInstantLanding();
+      MockResizeObserver.instances[0].trigger(); // no growth
+      flushRaf(16);
+    });
+    expect(metrics.scrollTop).toBe(700);
+
+    // The first real growth still snaps instantly — the arm survived the no-op.
+    act(() => {
+      metrics.scrollHeight = 1400;
+      MockResizeObserver.instances[0].trigger();
+    });
+    expect(metrics.scrollTop).toBe(1100);
+    act(() => { flushRaf(16); });
+    expect(metrics.scrollTop).toBe(1100);
   });
 });

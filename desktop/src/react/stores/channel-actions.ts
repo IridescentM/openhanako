@@ -75,11 +75,16 @@ export async function loadConversationAgentActivities(conversationId: string): P
     if (!res.ok) return;
     const data = await res.json();
     const activities = keyActivities(data.activities || []);
-    const current = (useStore.getState().channelAgentActivities || {}) as ChannelAgentActivities;
+    const latestState = useStore.getState();
+    const current = (latestState.channelAgentActivities || {}) as ChannelAgentActivities;
     useStore.setState({
       channelAgentActivities: {
         ...current,
         [conversationId]: activities,
+      },
+      channelTickerStatus: {
+        ...(latestState.channelTickerStatus || {}),
+        [conversationId]: data.ticker || null,
       },
     });
   } catch (err) {
@@ -572,26 +577,47 @@ export async function removeChannelMember(channelId: string, memberId: string): 
 // 切换频道功能开关
 // ══════════════════════════════════════════════════════
 
-export async function toggleChannelsEnabled(): Promise<boolean> {
+export async function toggleChannelsEnabled(): Promise<boolean | undefined> {
   const s = useStore.getState();
+  if (s.channelsEnabled === undefined) return undefined;
+  const previousEnabled = s.channelsEnabled;
   const newEnabled = !s.channelsEnabled;
-  useStore.setState({ channelsEnabled: newEnabled });
-
-  if (newEnabled) {
-    await loadChannels();
-  }
 
   try {
-    await hanaFetch('/api/channels/toggle', {
+    const res = await hanaFetch('/api/channels/toggle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: newEnabled }),
     });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json().catch(() => ({}));
+    const enabled = typeof data.enabled === 'boolean' ? data.enabled : newEnabled;
+    useStore.setState({ channelsEnabled: enabled });
+
+    if (enabled) {
+      await loadChannels();
+    } else {
+      useStore.setState({
+        channels: [],
+        currentChannel: null,
+        channelMessages: [],
+        channelMessageCache: {},
+        channelMessageCacheDirty: {},
+        channelMembers: [],
+        channelTotalUnread: 0,
+        channelHeaderName: '',
+        channelHeaderMembersText: '',
+        channelInfoName: '',
+        channelIsDM: false,
+      });
+    }
+
+    return enabled;
   } catch (err) {
     console.error('[channels] toggle backend failed:', err);
+    useStore.setState({ channelsEnabled: previousEnabled });
+    return previousEnabled;
   }
-
-  return newEnabled;
 }
 
 // ══════════════════════════════════════════════════════
@@ -608,9 +634,10 @@ export async function createChannel(name: string, members: string[], intro?: str
         members,
         intro: intro || undefined,
       }),
+      throwOnHttpError: false,
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     if (data.error) throw new Error(data.error);
 
     await loadChannels();

@@ -17,11 +17,11 @@
 }
 
 .sectionTitle {
-    padding: var(--space-xs) var(--space-sm) var(--space-xs);
+    padding: var(--space-4) var(--space-8) var(--space-4);
     flex: 0 0 auto;
     font-family: "Songti SC", "Noto Serif CJK SC", serif;
     justify-content: flex-start;
-    padding-left: var(--space-md);
+    padding-left: var(--space-16);
 }
 
 /* 工作台未设置 overlay */
@@ -33,23 +33,23 @@
     flex-direction: column;
     align-items: center;
     justify-content: flex-start;
-    padding: var(--space-lg);
+    padding: var(--space-24);
     padding-top: 45%;
     background: var(--bg-card);
 }
 
 .emptyText {
-    font-size: 0.9rem;
+    font-size: var(--fs-body);
     color: var(--text);
-    margin: 0 0 0.5rem;
+    margin: 0 0 var(--space-8);
 }
 
 .emptyHint {
-    font-size: 0.78rem;
+    font-size: var(--fs-caption);
     line-height: 1.7;
     color: var(--text-muted);
     text-align: center;
-    margin: 0 0 1rem;
+    margin: 0 0 var(--space-16);
     max-width: 240px;
 }
 
@@ -58,13 +58,13 @@
     align-items: center;
     gap: 0.3rem;
     font-family: inherit;
-    font-size: 0.8rem;
+    font-size: var(--fs-ui);
     color: var(--accent);
     background: var(--accent-light);
     border: none;
     border-radius: var(--radius-md);
     padding: 0.4rem 1rem;
-    cursor: pointer;
+    cursor: default;
     transition: opacity var(--duration-fast);
 }
 
@@ -79,7 +79,7 @@
 
 .headerCwdBtn {
     position: absolute;
-    right: var(--space-sm);
+    right: var(--space-8);
     top: 50%;
     transform: translateY(-50%);
     z-index: 1;
@@ -91,16 +91,16 @@
     align-items: center;
     justify-content: center;
     gap: 5px;
-    margin: 2px var(--space-sm) var(--space-xs);
+    margin: 2px var(--space-8) var(--space-4);
     padding: 5px 0;
     background: none;
     border: 1px solid var(--overlay-light);
     border-radius: var(--radius-sm);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
     color: var(--text-muted);
-    font-size: 0.7rem;
+    font-size: var(--fs-hint);
     font-family: inherit;
-    cursor: pointer;
+    cursor: default;
     transition: color var(--duration-fast), border-color var(--duration-fast), box-shadow var(--duration-fast);
     flex-shrink: 0;
 }
@@ -140,7 +140,7 @@
 .list:empty::after {
     content: attr(data-empty-text);
     color: var(--text-muted);
-    font-size: 0.7rem;
+    font-size: var(--fs-hint);
     font-family: inherit;
 }
 
@@ -151,8 +151,8 @@
     min-height: 0;
     overflow-y: auto;
     display: block;
-    padding: 4px 2px calc(var(--right-workspace-jian-reserved, 56px) + 8px);
-    scroll-padding-bottom: calc(var(--right-workspace-jian-reserved, 56px) + 8px);
+    padding: 4px 2px calc(var(--right-workspace-jian-reserved, 56px) + var(--panel-edge-gap));
+    scroll-padding-bottom: calc(var(--right-workspace-jian-reserved, 56px) + var(--panel-edge-gap));
 }
 
 .tree:empty {
@@ -164,7 +164,7 @@
 .tree:empty::after {
     content: attr(data-empty-text);
     color: var(--text-muted);
-    font-size: 0.7rem;
+    font-size: var(--fs-hint);
     font-family: inherit;
 }
 
@@ -192,7 +192,7 @@
     z-index: 1;
     height: var(--right-workspace-list-toolbar-height);
     min-height: 0;
-    margin: 0 var(--space-sm);
+    margin: 0 var(--space-8);
 }
 
 .rightWorkspaceSection .tree {
@@ -237,7 +237,7 @@
     margin: 0 2px;
     border-radius: 4px;
     color: var(--text);
-    font-size: 0.74rem;
+    font-size: var(--fs-caption);
     line-height: 1.4;
     cursor: default;
     user-select: none;
@@ -285,9 +285,9 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 5px var(--space-sm);
+    padding: 5px var(--space-8);
     cursor: default;
-    font-size: 0.72rem;
+    font-size: var(--fs-hint);
     line-height: 1.5;
     transition: background var(--duration-instant);
     border-radius: 3px;
@@ -343,7 +343,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin: 3px var(--space-sm) 2px;
+    margin: 3px var(--space-8) 2px;
     flex-shrink: 0;
     min-height: 20px;
 }
@@ -365,10 +365,10 @@
     border: none;
     border-radius: var(--radius-sm);
     color: var(--text-muted);
-    font-size: 0.65rem;
+    font-size: var(--fs-hint);
     font-family: inherit;
     line-height: 1;
-    cursor: pointer;
+    cursor: default;
     transition: background var(--duration-fast), color var(--duration-fast);
     white-space: nowrap;
 }
@@ -419,7 +419,7 @@
 .searchWrap {
     position: relative;
     flex: 0 0 auto;
-    margin: 2px var(--space-sm) 0;
+    margin: 2px var(--space-8) 0;
 }
 
 .searchInput {
@@ -432,7 +432,7 @@
     background: var(--bg-card);
     color: var(--text);
     font-family: inherit;
-    font-size: 0.65rem;
+    font-size: var(--fs-hint);
     line-height: 1;
     outline: none;
 }
@@ -474,7 +474,7 @@
     color: var(--text);
     font-family: inherit;
     text-align: left;
-    cursor: pointer;
+    cursor: default;
 }
 
 .searchResult:hover {
@@ -490,7 +490,7 @@
 }
 
 .searchResultName {
-    font-size: 0.7rem;
+    font-size: var(--fs-hint);
     line-height: 1.25;
 }
 
@@ -516,9 +516,9 @@
     border-radius: var(--radius-sm);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
     color: var(--text-muted);
-    font-size: 0.65rem;
+    font-size: var(--fs-hint);
     font-family: inherit;
-    cursor: pointer;
+    cursor: default;
     white-space: nowrap;
     flex-shrink: 0;
     transition: color var(--duration-fast), border-color var(--duration-fast), box-shadow var(--duration-fast);
@@ -548,7 +548,7 @@
 .cwdPanelWrap {
     position: relative;
     z-index: 20;
-    margin: 0 var(--space-sm);
+    margin: 0 var(--space-8);
 }
 
 .cwdPanel {
@@ -600,13 +600,13 @@
 .cwdCtxMenu button {
     display: block;
     width: 100%;
-    padding: 6px 12px;
+    padding: var(--space-6) var(--space-12);
     font-family: inherit;
-    font-size: 0.78rem;
+    font-size: var(--fs-caption);
     color: var(--text);
     background: none;
     border: none;
-    cursor: pointer;
+    cursor: default;
     text-align: left;
 }
 
@@ -634,7 +634,7 @@
 }
 
 .cwdEmpty {
-    font-size: 0.72rem;
+    font-size: var(--fs-hint);
     color: var(--text-muted);
     text-align: center;
     padding: 0.4rem 0 0.1rem;
@@ -661,7 +661,7 @@
     flex-direction: column;
     padding: 0.2rem 0.3rem;
     border-radius: var(--radius-sm);
-    cursor: pointer;
+    cursor: default;
     transition: background var(--duration-instant);
 }
 
@@ -670,7 +670,7 @@
 }
 
 .cwdSkillName {
-    font-size: 0.72rem;
+    font-size: var(--fs-hint);
     color: var(--text);
 }
 
@@ -700,9 +700,9 @@
     border: none;
     border-radius: var(--radius-sm);
     color: var(--accent);
-    font-size: 0.68rem;
+    font-size: var(--fs-hint);
     font-family: inherit;
-    cursor: pointer;
+    cursor: default;
     transition: background var(--duration-fast);
     max-width: 100%;
     overflow: hidden;
@@ -746,7 +746,7 @@
 .renameInput {
     flex: 1;
     min-width: 0;
-    font-size: 0.72rem;
+    font-size: var(--fs-hint);
     font-family: inherit;
     line-height: 1.4;
     color: var(--text);
@@ -776,7 +776,7 @@
     align-items: center;
     justify-content: center;
     gap: 0.6em;
-    padding: var(--space-sm) var(--space-sm);
+    padding: var(--space-8) var(--space-8);
     border-bottom: 1px solid var(--jian-note-border, rgba(200, 160, 110, 0.2));
     flex-shrink: 0;
 }
@@ -791,7 +791,7 @@
 }
 
 .editorLabel {
-    font-size: 0.88rem;
+    font-size: var(--fs-body);
     font-weight: 600;
     color: var(--text-light);
     letter-spacing: 0.05em;
@@ -799,7 +799,7 @@
 
 .editorStatus {
     position: absolute;
-    right: var(--space-sm);
+    right: var(--space-8);
     top: 50%;
     transform: translateY(-50%);
     font-size: 0.58rem;
@@ -815,8 +815,8 @@
 .editorInput {
     flex: 1;
     width: 100%;
-    padding: var(--space-sm) var(--space-md);
-    font-size: 0.72rem;
+    padding: var(--space-8) var(--space-16);
+    font-size: var(--fs-hint);
     line-height: 1.55;
     color: var(--text);
     background: transparent;
@@ -830,78 +830,4 @@
 .editorInput::placeholder {
     color: var(--text-muted);
     opacity: 0.5;
-}
-
-/* ── 执行记录 ── */
-.execLog {
-    border-top: 1px solid var(--jian-note-border, rgba(200, 160, 110, 0.2));
-    padding: var(--space-sm) var(--space-md);
-    max-height: 140px;
-    overflow-y: auto;
-    flex-shrink: 0;
-}
-
-.execLogHeader {
-    font-size: 0.68rem;
-    font-weight: 600;
-    color: var(--text-muted);
-    margin-bottom: 0.3em;
-    letter-spacing: 0.04em;
-}
-
-.execLogList {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-}
-
-.execLogItem {
-    display: flex;
-    align-items: baseline;
-    gap: 0.4em;
-    padding: 0.15em 0;
-    font-size: 0.66rem;
-    line-height: 1.4;
-    color: var(--text-light);
-}
-
-.execLogTime {
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-    flex-shrink: 0;
-}
-
-.execLogTask {
-    color: var(--text);
-}
-
-.execLogResult {
-    color: var(--text-muted);
-    font-style: italic;
-}
-
-.execLogResult::before {
-    content: "— ";
-}
-
-.execLogDelete {
-    margin-left: auto;
-    flex-shrink: 0;
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    font-size: 0.72rem;
-    padding: 0 0.2em;
-    opacity: 0;
-    transition: opacity var(--duration-fast);
-}
-
-.execLogItem:hover .execLogDelete {
-    opacity: 0.6;
-}
-
-.execLogDelete:hover {
-    opacity: 1 !important;
-    color: var(--danger, #c44);
 }

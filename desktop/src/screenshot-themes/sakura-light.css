@@ -27,7 +27,7 @@ html {
 
 /* body 全宽，不做限宽，让 ::after 能贴到画面边缘 */
 body {
-  font-family: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", "Lora", "Georgia", serif;
+  font-family: var(--screenshot-font-family, "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", "Lora", "Georgia", serif);
   font-size: 1rem;
   line-height: 1.65;
   color: var(--sakura-text);
@@ -40,9 +40,9 @@ body {
 
 /* article 做居中限宽，承担原来 body 的排版职责 */
 article {
-  max-width: 400px;
+  max-width: 416px;
   margin: 0 auto;
-  padding: 5rem 0.85rem 0.67rem 0.85rem;
+  padding: 5rem 0.5rem 0.67rem 0.5rem;
 }
 
 /* 顶部 header：文件名紧贴花，整体靠右 */
@@ -50,9 +50,9 @@ article {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  max-width: 400px;
+  max-width: 416px;
   margin: 0 auto;
-  padding: 1.5rem 0.85rem 0.5rem 0.85rem;
+  padding: 1.5rem 0.5rem 0.5rem 0.5rem;
 }
 
 .page-title {
@@ -192,6 +192,13 @@ pre code {
 }
 
 /* Tables */
+.markdown-table-scroll {
+  max-width: 100%;
+  margin: 1.5em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -199,10 +206,16 @@ table {
   font-size: 0.95em;
 }
 
+.markdown-table-scroll > table {
+  min-width: max-content;
+  margin: 0;
+}
+
 th, td {
   border: 1px solid var(--sakura-border);
   padding: 0.6em 1em;
   text-align: left;
+  white-space: nowrap;
 }
 
 th {

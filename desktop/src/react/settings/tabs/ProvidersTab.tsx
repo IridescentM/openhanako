@@ -7,7 +7,9 @@ import { loadSettingsConfig } from '../actions';
 import { ProviderDetail } from './providers/ProviderDetail';
 import { AddCustomButton, AddProviderOverlay } from './providers/ProviderList';
 import { OtherModelsSection } from './providers/OtherModelsSection';
+import { UsageLedgerSection } from './providers/UsageLedgerSection';
 import { SettingsSection } from '../components/SettingsSection';
+import { ProviderIcon } from '@/ui';
 import styles from '../Settings.module.css';
 
 export function ProvidersTab() {
@@ -64,6 +66,7 @@ export function ProvidersTab() {
         onClick={() => selectProvider(id)}
       >
         <span className={`${styles['pv-status-dot']}${p.has_credentials  ? ' ' + styles['on'] : ''}`} />
+        <ProviderIcon provider={id} className={styles['pv-list-item-icon']} />
         <span className={styles['pv-list-item-name']}>{preset?.label || p.display_name || id}</span>
         <span className={styles['pv-list-item-count']}>{modelCount}</span>
       </button>
@@ -77,6 +80,7 @@ export function ProvidersTab() {
       onClick={() => selectProvider(preset.value)}
     >
       <span className={styles['pv-status-dot']} />
+      <ProviderIcon provider={preset.value} className={styles['pv-list-item-icon']} />
       <span className={styles['pv-list-item-name']}>{preset.label}</span>
     </button>
   );
@@ -90,6 +94,7 @@ export function ProvidersTab() {
         onClick={() => selectProvider(id)}
       >
         <span className={styles['pv-status-dot']} />
+        <ProviderIcon provider={id} className={styles['pv-list-item-icon']} />
         <span className={styles['pv-list-item-name']}>{p.display_name || id}</span>
       </button>
     );
@@ -119,10 +124,10 @@ export function ProvidersTab() {
             )}
 
             <div className={styles['pv-list-group-label']}>API</div>
+            {customProviders.map(renderRegistered)}
             {presetProviders.map(renderRegistered)}
             {unregisteredApiPresets.map(renderUnregistered)}
             {registryOnlyApiProviders.map(renderRegistrySetup)}
-            {customProviders.map(renderRegistered)}
 
             <AddCustomButton onClick={() => setAddingProvider(true)} />
           </div>
@@ -140,6 +145,7 @@ export function ProvidersTab() {
                 base_url: preset?.url || '',
                 api: preset?.api || '',
                 api_key: '',
+                headers: {},
                 models: [],
                 custom_models: [],
                 has_credentials: false,
@@ -152,8 +158,14 @@ export function ProvidersTab() {
                   providerId={selected}
                   summary={summary}
                   providerConfig={providers[selected]}
-                  isPresetSetup={(!existing || isRegistryOnlySetup) && !!preset}
-                  presetInfo={preset}
+                  isPresetSetup={!existing || isRegistryOnlySetup}
+                  presetInfo={preset || (isRegistryOnlySetup ? {
+                    label: summary.display_name || selected,
+                    value: selected,
+                    url: summary.base_url,
+                    api: summary.api,
+                    local: summary.auth_type === 'none',
+                  } : undefined)}
                   onRefresh={async () => { await loadSettingsConfig(); await loadSummary(); }}
                 />
               );
@@ -178,6 +190,8 @@ export function ProvidersTab() {
       <SettingsSection title={t('settings.api.otherModelSection')}>
         <OtherModelsSection providers={providers} />
       </SettingsSection>
+
+      <UsageLedgerSection />
     </div>
   );
 }

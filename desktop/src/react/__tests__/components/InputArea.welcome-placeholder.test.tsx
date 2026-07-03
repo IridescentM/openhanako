@@ -106,6 +106,7 @@ vi.mock('../../components/input/SessionConfirmationPrompt', () => ({
 
 vi.mock('../../hooks/use-slash-items', () => ({
   useSkillSlashItems: () => [],
+  useServerSlashCommandItems: () => [],
 }));
 
 vi.mock('../../utils/paste-upload-feedback', () => ({
@@ -139,6 +140,8 @@ function seedInputState(overrides: Partial<ReturnType<typeof useStore.getState>>
     attachedFiles: [],
     attachedFilesBySession: {},
     docContextAttached: false,
+    quoteCandidate: null,
+    quotedSelections: [],
     quotedSelection: null,
     models: [{
       id: 'deepseek-chat',
