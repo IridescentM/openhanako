@@ -59,12 +59,12 @@ function spawnServer() {
 
   const serverEnv = applyDevEnvironment({ ...process.env });
   serverEnv.HANA_ROOT = rootDir;
-  serverEnv.HANA_SERVER_ENTRY = path.join(rootDir, "server", "index.ts");
+  serverEnv.HANA_SERVER_ENTRY = path.join(rootDir, "server", "index.js");
   serverEnv.HANA_CREATE_STARTUP_SESSION = "0";
   serverEnv.HANA_PORT = process.env.HANA_PORT || "0";
   delete serverEnv.ELECTRON_RUN_AS_NODE;
 
-  serverProcess = spawn(process.execPath, [path.join(rootDir, "server", "bootstrap.ts")], {
+  serverProcess = spawn(process.execPath, [path.join(rootDir, "server", "bootstrap.js")], {
     cwd: rootDir,
     env: serverEnv,
     stdio: "inherit",
