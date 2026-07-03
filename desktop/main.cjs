@@ -8,7 +8,7 @@
  * 4. 关闭 splash，显示主窗口
  * 5. 优雅关闭
  */
-const { app, BrowserWindow, WebContentsView, globalShortcut, ipcMain, dialog, session, shell, nativeTheme, Tray, Menu, nativeImage, systemPreferences, Notification, webContents, screen, powerSaveBlocker } = require("electron");
+const { app, BrowserWindow, WebContentsView, globalShortcut, ipcMain, dialog, session, shell, nativeTheme, Tray, Menu, nativeImage, systemPreferences, Notification, webContents, screen, powerSaveBlocker, powerMonitor } = require("electron");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
@@ -1147,9 +1147,9 @@ async function _spawnServerOnce(serverInfoPath) {
     // native addon 被 Electron 自带 Node 误加载。
     const devRoot = path.join(__dirname, "..");
     serverBin = process.env.HANA_DEV_NODE_BIN || process.env.npm_node_execpath || "node";
-    serverArgs = [path.join(devRoot, "server", "bootstrap.ts")];
+    serverArgs = [path.join(devRoot, "server", "bootstrap.js")];
     serverEnv.HANA_ROOT = devRoot;
-    serverEnv.HANA_SERVER_ENTRY = path.join(devRoot, "server", "index.ts");
+    serverEnv.HANA_SERVER_ENTRY = path.join(devRoot, "server", "index.js");
     // Keep dev and packaged startup contracts identical.
     serverEnv.HANA_CREATE_STARTUP_SESSION = "0";
     delete serverEnv.ELECTRON_RUN_AS_NODE;
@@ -4687,6 +4687,15 @@ wrapIpcBestEffortHandler("app-ready", (event) => {
 
 // ── App 生命周期 ──
 app.whenReady().then(async () => {
+  // 系统休眠唤醒时通知渲染进程重连 WebSocket
+  powerMonitor.on("resume", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("system-resumed");
+    }
+    if (browserViewerWindow && !browserViewerWindow.isDestroyed()) {
+      browserViewerWindow.webContents.send("system-resumed");
+    }
+  });
   try {
     _startHiddenAtLogin = getAutoLaunchStatus({ app }).openedAtLogin === true && isSetupComplete();
 

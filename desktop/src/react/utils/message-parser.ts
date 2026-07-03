@@ -196,8 +196,7 @@ export function parseUserAttachments(content: string): ParsedAttachments {
 // ── 工具详情提取 ──
 
 export function truncatePath(p: string): string {
-  if (!p || p.length <= 35) return p;
-  return '…' + p.slice(-34);
+  return p || '';
 }
 
 export function extractHostname(u: string): string {
@@ -205,9 +204,8 @@ export function extractHostname(u: string): string {
   try { return new URL(u).hostname; } catch { return u; }
 }
 
-export function truncateHead(s: string, max: number): string {
-  if (!s || s.length <= max) return s;
-  return s.slice(0, max - 1) + '…';
+export function truncateHead(s: string, _max: number): string {
+  return s || '';
 }
 
 export interface ToolDetail {

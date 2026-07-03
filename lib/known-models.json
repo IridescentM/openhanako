@@ -3138,6 +3138,13 @@
     }
   },
   "zhipu": {
+    "glm52-fp8": {
+      "name": "GLM-5.2 FP8",
+      "context": 200000,
+      "maxOutput": 128000,
+      "image": false,
+      "reasoning": true
+    },
     "glm-5.2": {
       "name": "GLM-5.2",
       "context": 1000000,

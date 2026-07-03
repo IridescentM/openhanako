@@ -38,6 +38,10 @@ const WS_SLOW_RETRY_DELAY = 60_000;
 let _wsRetryCount = 0;
 let _resourceForegroundCatchUpCleanup: (() => void) | null = null;
 
+// ── 心跳保活 ──
+let _heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+const HEARTBEAT_INTERVAL = 25000; // 每 25 秒发一次 ping
+
 // 注入循环依赖的 handlers
 injectHandlers(handleServerMessage, applyStreamingStatus);
 injectWebSocketGetter(() => _ws);
@@ -109,6 +113,9 @@ async function openConnectionWebSocket(connection: ServerConnection): Promise<vo
     setStatus('status.connected', true);
     useStore.setState({ wsState: 'connected', wsReconnectAttempt: 0, compactingSessions: [] });
 
+    // 启动心跳
+    startHeartbeat();
+
     const s = useStore.getState();
     const streamingPaths = resolveStreamingSessionResumeTargets(s);
     if (streamingPaths.length > 0) {
@@ -150,6 +157,7 @@ async function openConnectionWebSocket(connection: ServerConnection): Promise<vo
   };
 
   _ws.onclose = () => {
+    stopHeartbeat();
     setStatus('status.disconnected', false);
     scheduleReconnect();
   };
@@ -176,5 +184,35 @@ function scheduleReconnect(): void {
 /** 手动重连（由 StatusBar 重连按钮调用），重置重试计数 */
 export function manualReconnect(): void {
   _wsRetryCount = 0;
+  connectWebSocket();
+}
+
+// ── 心跳保活 ──
+function startHeartbeat(): void {
+  stopHeartbeat();
+  _heartbeatTimer = setInterval(() => {
+    if (_ws?.readyState === WebSocket.OPEN) {
+      try { _ws.send(JSON.stringify({ type: 'ping' })); } catch { /* ignore */ }
+    }
+  }, HEARTBEAT_INTERVAL);
+}
+
+function stopHeartbeat(): void {
+  if (_heartbeatTimer) {
+    clearInterval(_heartbeatTimer);
+    _heartbeatTimer = null;
+  }
+}
+
+/** 主动重连（由 powerMonitor 唤醒时调用），立即重连并重置退避 */
+export function forceReconnect(): void {
+  stopHeartbeat();
+  if (_wsRetryTimer) { clearTimeout(_wsRetryTimer); _wsRetryTimer = null; }
+  _wsRetryDelay = 1000;
+  _wsRetryCount = 0;
+  if (_ws) {
+    try { _ws.onclose = null; _ws.close(); } catch { /* silent */ }
+    _ws = null;
+  }
   connectWebSocket();
 }

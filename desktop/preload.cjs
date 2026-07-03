@@ -118,6 +118,11 @@ contextBridge.exposeInMainWorld("hana", {
     ipcRenderer.on("server-restarted", handler);
     return () => ipcRenderer.removeListener("server-restarted", handler);
   },
+  onSystemResumed: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("system-resumed", handler);
+    return () => ipcRenderer.removeListener("system-resumed", handler);
+  },
   // 浏览器查看器窗口
   openBrowserViewer: (url) => ipcRenderer.invoke("open-browser-viewer", resolveTheme(), url),
   onBrowserUpdate: (cb) => {

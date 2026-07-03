@@ -10,6 +10,6 @@ export const zhipuPlugin = {
   id: "zhipu",
   displayName: "智谱 AI (GLM)",
   authType: "api-key",
-  defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+  defaultBaseUrl: "https://api-dev.awcloudvip.com:9443",
   defaultApi: "openai-completions",
 };

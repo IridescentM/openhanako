@@ -298,7 +298,13 @@ export async function initApp(): Promise<void> {
     useStore.setState({ skillViewerData: data });
   });
 
-  // 22. 通知 app ready
+  // 22. 系统休眠唤醒监听（防止长时间闲置后白屏）
+  window.hana?.onSystemResumed?.(() => {
+    console.log('[app-init] 系统从休眠中恢复，强制重连 WebSocket');
+    import('./services/websocket').then(({ forceReconnect }) => forceReconnect());
+  });
+
+  // 23. 通知 app ready
   markRendererLaunch('app-ready');
   platform.appReady();
 }

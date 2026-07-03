@@ -235,6 +235,20 @@ function appendLaunchLog({ diagnosticsDir, event, payload, now = new Date() }) {
   if (!diagnosticsDir) return null;
   fs.mkdirSync(diagnosticsDir, { recursive: true });
   const filePath = path.join(diagnosticsDir, "launch.log");
+
+  // 日志轮转：超过 500MB 时截断，保留最近 1000 行
+  try {
+    const stat = fs.statSync(filePath);
+    if (stat.size > 500 * 1024 * 1024) {
+      const content = fs.readFileSync(filePath, "utf-8");
+      const lines = content.split("\n");
+      const kept = lines.slice(Math.max(0, lines.length - 1000)).join("\n");
+      fs.writeFileSync(filePath, kept + "\n", "utf-8");
+    }
+  } catch {
+    // 文件不存在或读取失败，忽略
+  }
+
   fs.appendFileSync(filePath, JSON.stringify({
     event,
     time: now instanceof Date ? now.toISOString() : String(now),

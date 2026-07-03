@@ -127,7 +127,7 @@ const KATEX_CLASS_NAMES = new Set([
   'mainrm',
 ]);
 
-const SAFE_URL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:']);
+const SAFE_URL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:', 'file:']);
 const SAFE_IMAGE_URL_PROTOCOLS = new Set(['http:', 'https:', 'file:']);
 const EXPLICIT_PROTOCOL_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 const HTML_DIMENSION_RE = /^[1-9]\d{0,4}$/;

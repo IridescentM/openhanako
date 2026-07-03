@@ -41,7 +41,7 @@ export const ChatTimelineNavigator = memo(function ChatTimelineNavigator({
   const measure = useCallback(() => {
     const panel = scrollRef.current;
     if (!panel || anchors.length === 0) {
-      setLayouts({});
+      setLayouts(prev => Object.keys(prev).length === 0 ? prev : {});
       setActiveId(null);
       return;
     }
@@ -62,7 +62,21 @@ export const ChatTimelineNavigator = memo(function ChatTimelineNavigator({
       };
     }
 
-    setLayouts(next);
+    setLayouts(prev => {
+      // 避免无变化时产生新引用导致重渲染循环
+      if (Object.keys(prev).length === Object.keys(next).length) {
+        let changed = false;
+        for (const [id, layout] of Object.entries(next)) {
+          const prevLayout = prev[id];
+          if (!prevLayout || prevLayout.targetTop !== layout.targetTop) {
+            changed = true;
+            break;
+          }
+        }
+        if (!changed) return prev;
+      }
+      return next;
+    });
   }, [anchors, messageElementsRef, scrollRef]);
 
   const updateActive = useCallback(() => {

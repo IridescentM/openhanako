@@ -334,6 +334,21 @@
     font-family: var(--font-serif);
 }
 
+/* Emoji 修复：Noto Serif SC 的 @font-face unicode-range 覆盖了 emoji 区段，
+   但不含 emoji 图形。这里声明一个仅覆盖 emoji 区段的新字体，排在 serif 前面，
+   让浏览器优先用系统 emoji 字体渲染 emoji 字符。 */
+@font-face {
+    font-family: 'HanaEmoji';
+    src: local('Apple Color Emoji'), local('Segoe UI Emoji'), local('Noto Color Emoji');
+    unicode-range: U+2600-27BF, U+1F000-1FAFF, U+FE0F, U+200D, U+2764, U+2705, U+2728, U+1F600-1F64F, U+1F680-1F6FF;
+    font-display: swap;
+}
+
+.messageAssistant :global(.md-content),
+.messageUser :global(.md-content) {
+    font-family: 'HanaEmoji', var(--font-serif);
+}
+
 .messageAssistantInterludeOnly {
     width: 100%;
     max-width: 100%;
@@ -1318,9 +1333,8 @@
     font-size: var(--fs-hint);
     color: var(--text-muted);
     font-family: var(--font-mono);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: normal;
+    word-break: break-all;
 }
 
 .toolDetailLink {

@@ -346,8 +346,8 @@ export function createAgentsRoute(engine) {
       return c.json({ error: "invalid id" }, 400);
     }
     const avatarPath = path.join(agentDir(engine, id), "avatars");
-    const mimeMap = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp" };
-    for (const ext of ["png", "jpg", "jpeg", "webp"]) {
+    const mimeMap = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", svg: "image/svg+xml" };
+    for (const ext of ["png", "jpg", "jpeg", "webp", "svg"]) {
       const p = path.join(avatarPath, `agent.${ext}`);
       try {
         await fs.access(p);
@@ -378,7 +378,7 @@ export function createAgentsRoute(engine) {
     const buf = Buffer.from(match[2], "base64");
     const dir = path.join(agentDir(engine, id), "avatars");
     await fs.mkdir(dir, { recursive: true });
-    for (const oldExt of ["png", "jpg", "jpeg", "webp"]) {
+    for (const oldExt of ["png", "jpg", "jpeg", "webp", "svg"]) {
       try { await fs.unlink(path.join(dir, `agent.${oldExt}`)); } catch {}
     }
     await fs.writeFile(path.join(dir, `agent.${ext}`), buf);
@@ -393,7 +393,7 @@ export function createAgentsRoute(engine) {
       return c.json({ error: "agent not found" }, 404);
     }
     const dir = path.join(agentDir(engine, id), "avatars");
-    for (const ext of ["png", "jpg", "jpeg", "webp"]) {
+    for (const ext of ["png", "jpg", "jpeg", "webp", "svg"]) {
       try { await fs.unlink(path.join(dir, `agent.${ext}`)); } catch {}
     }
     engine.invalidateAgentListCache();
