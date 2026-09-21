@@ -219,6 +219,9 @@ function InputAreaInner({ surface }: Required<InputAreaProps>) {
   // Local state
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('ask');
   const [sending, setSending] = useState(false);
+  // 同步防重入守卫：setSending 是异步 React 状态，快速双击 Enter/连点发送时
+  // 两次 handleSend 都可能读到 sending===false，导致同一消息重复发送。
+  const submitGuardRef = useRef(false);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashSelected, setSlashSelected] = useState(0);
   const [slashBusy, setSlashBusy] = useState<string | null>(null);
@@ -848,9 +851,11 @@ function InputAreaInner({ surface }: Required<InputAreaProps>) {
     if ((!text && !hasFiles && !docContextAttached && !useStore.getState().quotedSelection) || !connected) return;
     if (isStreaming) return;
     if (sending) return;
+    if (submitGuardRef.current) return;
     if (modelSwitching) return;
     if (useStore.getState().pendingSessionSwitchPath) return;
     setSending(true);
+    submitGuardRef.current = true;
 
     try {
       if (pendingNewSession) {
@@ -1003,6 +1008,7 @@ function InputAreaInner({ surface }: Required<InputAreaProps>) {
       if (skills.length > 0) wsMsg.skills = skills;
       ws?.send(JSON.stringify(wsMsg));
     } finally {
+      submitGuardRef.current = false;
       setSending(false);
     }
   }, [editor, attachedFiles, docContextAttached, connected, isStreaming, sending, pendingNewSession, currentDoc, clearAttachedFiles, clearDraft, currentSessionPath, setDocContextAttached, slashCommands, slashSelected, handleSlashSelect, supportsVision, currentModelInfo, loadVisionAuxiliaryConfig, modelSwitching, t]);

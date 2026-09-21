@@ -471,6 +471,17 @@ export function handleServerMessage(msg: any): void {
         break;
       }
       const text = typeof msg.message.text === 'string' ? msg.message.text : '';
+      // 防重复追加（移植自远端 753598a5）：同 id 或同 text+timestamp(±5s) 的用户消息
+      // 已存在则跳过，避免服务端重复回传/重连重放时用户消息在气泡里出现两份。
+      const existingItems = useStore.getState().chatSessions[sp]?.items;
+      const duplicated = existingItems?.some(item =>
+        item.type === 'message' &&
+        item.data.role === 'user' &&
+        (item.data.id === msg.message.id ||
+          (item.data.text === text &&
+            Math.abs((item.data.timestamp || 0) - normalizeMessageTimestamp(msg.message.timestamp)) < 5000))
+      );
+      if (duplicated) break;
       useStore.getState().appendItem(sp, {
         type: 'message',
         data: {
