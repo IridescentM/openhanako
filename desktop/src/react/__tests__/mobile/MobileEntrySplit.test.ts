@@ -28,7 +28,8 @@ describe('Mobile PWA entry split', () => {
     const css = readFileSync(path.join(process.cwd(), 'desktop/src/react/mobile/mobile-entry.css'), 'utf8');
 
     expect(css).toMatch(/@import\s+url\(['"]?\.\.\/\.\.\/themes\/new-warm-paper-fonts\.css['"]?\)/);
-    expect(css).toMatch(/--font-serif:\s*'EB Garamond',\s*'Noto Serif SC',\s*'Source Han Serif SC',\s*'Songti SC',\s*'STSong',\s*serif/);
+    expect(css).toMatch(/@import\s+url\(['"]?\.\.\/\.\.\/themes\/noto-color-emoji\.css['"]?\)/);
+    expect(css).toMatch(/--font-serif:\s*'Noto Color Emoji',\s*'EB Garamond',\s*'Noto Serif SC',\s*'Source Han Serif SC',\s*'Songti SC',\s*'STSong',\s*serif/);
     expect(css).toMatch(/body\.font-sans\s*\{[\s\S]*--font-serif:\s*var\(--font-ui\)/);
   });
 

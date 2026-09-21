@@ -1016,10 +1016,10 @@ function InputAreaInner({ surface }: Required<InputAreaProps>) {
     if (!ws) return;
     const sessionPath = useStore.getState().currentSessionPath;
     if (sessionPath) {
-      const { renderMarkdown } = await import('../utils/markdown');
+      const { renderUserMessageHtml } = await import('../utils/markdown');
       useStore.getState().appendItem(sessionPath, {
         type: 'message',
-        data: { id: `user-${Date.now()}`, role: 'user', text, textHtml: renderMarkdown(text), timestamp: Date.now() },
+        data: { id: `user-${Date.now()}`, role: 'user', text, textHtml: renderUserMessageHtml(text), timestamp: Date.now() },
       });
     }
     editor.commands.clearContent();

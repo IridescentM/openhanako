@@ -14,6 +14,7 @@ import taskLists from 'markdown-it-task-lists';
 import 'katex/dist/katex.min.css';
 import { sanitizeMarkdownPreviewHtml } from './markdown-html-sanitizer';
 import { extOfName, isImageOrSvgExt } from './file-kind';
+import { escapeHtml } from './format';
 
 type MarkdownItInstance = ReturnType<typeof markdownit>;
 type MarkdownRenderEnv = {
@@ -649,6 +650,15 @@ export function getPreviewMd(): MarkdownItInstance {
 
 export function renderMarkdown(src: string): string {
   return getMd().render(src);
+}
+
+/**
+ * 用户消息按字面文本渲染：转义 HTML、保留换行，不做任何 markdown 转换。
+ * 背景：聊天输入框定位是“字面文本”（敲什么发什么），气泡若渲染 markdown，
+ * ~~x~~ / **x** / `x` 等字符会在显示层“消失”，用户无法核对实际发送内容。
+ */
+export function renderUserMessageHtml(src: string): string {
+  return `<p>${escapeHtml(src).replace(/\n/g, '<br>')}</p>`;
 }
 
 export function renderMarkdownPreview(src: string, options: MarkdownPreviewOptions = {}): string {

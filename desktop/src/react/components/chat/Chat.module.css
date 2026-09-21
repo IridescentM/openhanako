@@ -254,24 +254,14 @@
     position: relative;
 }
 
-/* 助手回答正文用宋体 */
-.messageAssistant :global(.md-content) {
-    font-family: var(--font-serif);
-}
-
-/* Emoji 修复：Noto Serif SC 的 @font-face unicode-range 覆盖了 emoji 区段，
-   但不含 emoji 图形。这里声明一个仅覆盖 emoji 区段的新字体，排在 serif 前面，
-   让浏览器优先用系统 emoji 字体渲染 emoji 字符。 */
-@font-face {
-    font-family: 'HanaEmoji';
-    src: local('Apple Color Emoji'), local('Segoe UI Emoji'), local('Noto Color Emoji');
-    unicode-range: U+2600-27BF, U+1F000-1FAFF, U+FE0F, U+200D, U+2764, U+2705, U+2728, U+1F600-1F64F, U+1F680-1F6FF;
-    font-display: swap;
-}
-
+/* 助手/用户消息正文用宋体。
+   注意：不要用 @font-face src: local('Apple Color Emoji') 之类的方案去“修”emoji——
+   Chromium/Electron 里彩色 emoji 字体经 @font-face 实例化会得到空字形面，
+   其 unicode-range 覆盖到的符号/emoji（★ ♥ ✓ ✅ ✨ ☀ 😀 等）会全部渲染成空白。
+   不声明任何 emoji 字体，让 Chromium 的系统级 fallback（Apple Color Emoji 等）自然生效。 */
 .messageAssistant :global(.md-content),
 .messageUser :global(.md-content) {
-    font-family: 'HanaEmoji', var(--font-serif);
+    font-family: var(--font-serif);
 }
 
 /* ── Message action buttons (shared by user & assistant) ── */

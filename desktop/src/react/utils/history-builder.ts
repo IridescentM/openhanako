@@ -7,7 +7,7 @@
 import type { ChatMessage, ChatListItem, ContentBlock } from '../stores/chat-types';
 import type { TodoItem } from '../types';
 import { parseMoodFromContent, parseCardFromContent, parseUserAttachments } from './message-parser';
-import { renderMarkdown } from './markdown';
+import { renderMarkdown, renderUserMessageHtml } from './markdown';
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- API 历史消息 JSON 结构动态，难以静态收窄 */
 
@@ -193,7 +193,7 @@ export function buildItemsFromHistory(data: HistoryApiResponse): ChatListItem[] 
         sourceEntryId: m.entryId,
         role: 'user',
         text,
-        textHtml: text ? renderMarkdown(text) : undefined,
+        textHtml: text ? renderUserMessageHtml(text) : undefined,
         attachments: allAtts.length ? allAtts : undefined,
         deskContext: deskContext || undefined,
         quotedText: quotedText || undefined,

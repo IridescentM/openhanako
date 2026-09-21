@@ -30,7 +30,7 @@ import {
 } from './stream-resume';
 import { TODO_TOOL_NAMES, type TodoToolName } from '../utils/todo-constants';
 import { applyTodoLifecycle, migrateLegacyTodos } from '../utils/todo-compat';
-import { renderMarkdown } from '../utils/markdown';
+import { renderMarkdown, renderUserMessageHtml } from '../utils/markdown';
 import { bumpMessageLiveVersion } from '../stores/message-live-version';
 
 declare function t(key: string, vars?: Record<string, string>): any;
@@ -477,7 +477,7 @@ export function handleServerMessage(msg: any): void {
           id: msg.message.id || `user-${Date.now()}`,
           role: 'user',
           text,
-          textHtml: text ? renderMarkdown(text) : undefined,
+          textHtml: text ? renderUserMessageHtml(text) : undefined,
           timestamp: normalizeMessageTimestamp(msg.message.timestamp),
           attachments: msg.message.attachments,
           quotedText: msg.message.quotedText,
