@@ -128,12 +128,28 @@ function buildModelEntry(modelEntry, provider, baseUrl = "", api = "openai-compl
   // 3. Gemini OpenAI 兼容层（/v1beta/openai）严格校验，不识别 store 字段会 400。
   //    Native google-generative-ai 不走 Chat Completions，不需要这组 OpenAI 字段兼容。
   if (provider !== "openai") {
-    const compat = { supportsDeveloperRole: false };
+    // yaml 模型条目可自带 compat 字段（如 reasoningEffortMap）——透传给 Pi SDK，
+    // 用于自定义网关对 reasoning_effort 档位的严格校验（如 Kimi K3 只接受 low/high/max）
+    const userCompat = isObj && modelEntry.compat && typeof modelEntry.compat === "object"
+      ? modelEntry.compat
+      : {};
+    const compat = { supportsDeveloperRole: false, ...userCompat };
     if (api === "openai-completions" && (
       provider === "gemini"
       || baseUrl.includes("generativelanguage.googleapis.com")
     )) {
       compat.supportsStore = false;
+    }
+    // Kimi/Moonshot 的推理模型（含 K3）对 reasoning/thinking effort 的合法值为 low/high/max，
+    // 不接受 medium。自动映射 openhanako 的 thinking level 到 Kimi 接受的档位。
+    if (provider === "moonshot" && entry.reasoning && !compat.reasoningEffortMap) {
+      compat.reasoningEffortMap = {
+        minimal: "low",
+        low: "low",
+        medium: "high",
+        high: "high",
+        xhigh: "max",
+      };
     }
     entry.compat = compat;
   }

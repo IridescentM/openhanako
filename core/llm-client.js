@@ -331,8 +331,13 @@ export async function callText({
     text = (typeof message?.content === "string")
       ? message.content.trim()
       : "";
-    removedStructuredThinking = typeof message?.reasoning_content === "string"
-      || typeof message?.thinking === "string";
+    // 字段兼容：zhipu/newapi 网关返回 reasoning，标准 OpenAI 是 reasoning_content/thinking
+    const reasoning = message?.reasoning_content ?? message?.thinking ?? message?.reasoning;
+    removedStructuredThinking = typeof reasoning === "string";
+    // utility 模式兜底：content 空而 reasoning 有值时，用 reasoning 当输出（避免思考模型 utility 空响应）
+    if (!text && typeof reasoning === "string" && reasoning.trim()) {
+      text = reasoning.trim();
+    }
   }
 
   // 清理 <think> 标签（部分 provider 用标签而非 content block 包裹思考内容）

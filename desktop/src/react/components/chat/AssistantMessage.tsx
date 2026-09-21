@@ -2,7 +2,7 @@
  * AssistantMessage — 助手消息，遍历 ContentBlock 按类型渲染
  */
 
-import { memo, useCallback, useMemo, useState } from 'react';
+import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { StreamingMarkdownContent } from './StreamingMarkdownContent';
 import { MoodBlock } from './MoodBlock';
 import { ThinkingBlock } from './ThinkingBlock';
@@ -73,10 +73,37 @@ export const AssistantMessage = memo(function AssistantMessage({
   const displayName = displayInfo.displayName;
   const displayYuan = displayInfo.yuan || globalYuan;
 
-  const blocks = useMemo(
-    () => (message.blocks || []).filter(block => block.type !== 'session_confirmation' || block.surface !== 'input'),
-    [message.blocks],
-  );
+  // 为每个 block 分配稳定 key，避免因数组 unshift/splice 导致索引偏移时
+  // React 卸载重建组件、丢失本地状态（如 ToolGroupBlock 的展开/折叠）。
+  const blockIdMapRef = useRef<Map<string, string>>(new Map());
+  const blockIdCounterRef = useRef(0);
+  const blocks = useMemo(() => {
+    const result = (message.blocks || []).filter(block => block.type !== 'session_confirmation' || block.surface !== 'input');
+    const newMap = new Map<string, string>();
+    const typeCounters: Record<string, number> = {};
+    for (const block of result) {
+      const type = block.type;
+      typeCounters[type] = (typeCounters[type] || 0) + 1;
+      const contentKey = `${type}#${typeCounters[type]}`;
+      const existing = blockIdMapRef.current.get(contentKey);
+      if (existing) {
+        newMap.set(contentKey, existing);
+      } else {
+        const newId = `blk-${blockIdCounterRef.current++}`;
+        newMap.set(contentKey, newId);
+      }
+    }
+    blockIdMapRef.current = newMap;
+    return result;
+  }, [message.blocks]);
+  const blockKeys = useMemo(() => {
+    const typeCounters: Record<string, number> = {};
+    return blocks.map(block => {
+      const type = block.type;
+      typeCounters[type] = (typeCounters[type] || 0) + 1;
+      return blockIdMapRef.current.get(`${type}#${typeCounters[type]}`) || `blk-fallback-${type}`;
+    });
+  }, [blocks]);
 
   const [copied, setCopied] = useState(false);
   const [retrying, setRetrying] = useState(false);
@@ -146,7 +173,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       <div className={`${styles.message} ${styles.messageAssistant}`}>
         {blocks.map((block, i) => (
           <ContentBlockView
-            key={`block-${i}`}
+            key={blockKeys[i]}
             block={block}
             agentName={displayName}
             agentId={agentId}

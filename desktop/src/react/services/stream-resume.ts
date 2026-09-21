@@ -10,7 +10,6 @@
 import { streamBufferManager } from '../hooks/use-stream-buffer';
 import { useStore } from '../stores';
 import { getWebSocket } from './websocket';
-import { clearChat } from '../stores/agent-actions';
 import { loadMessages } from '../stores/session-actions';
 
 // 延迟导入，打破循环依赖
@@ -99,7 +98,12 @@ async function rebuildCurrentSessionFromResume(msg: any): Promise<void> {
     // 清掉旧 buffer 防止脏写
     streamBufferManager.clear(sessionPath);
 
-    clearChat();
+    // 清除当前 session 的消息数据，但不设置 welcomeVisible=true。
+    // clearChat() 会设 welcomeVisible: true 导致切回流式会话时闪烁欢迎页。
+    const s = useStore.getState();
+    const sp = s.currentSessionPath;
+    if (sp) s.clearSession?.(sp);
+    useStore.setState({ sessionTodos: [] });
     await loadMessages(sessionPath);
 
     if (myVersion !== _streamResumeRebuildVersion) return;

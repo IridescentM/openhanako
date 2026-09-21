@@ -3036,8 +3036,8 @@
     }
   },
   "zhipu": {
-    "glm52-fp8": {
-      "name": "GLM-5.2 FP8",
+    "glm53-flash": {
+      "name": "glm53-flash",
       "context": 200000,
       "maxOutput": 128000,
       "image": false,
@@ -6043,8 +6043,8 @@
       "image": false,
       "reasoning": true
     },
-    "glm52-fp8": {
-      "name": "GLM-5.2 FP8",
+    "glm53-flash": {
+      "name": "glm53-flash",
       "context": 200000,
       "maxOutput": 128000,
       "image": false,
