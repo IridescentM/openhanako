@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { renderMarkdown, renderMarkdownPreview } from '../../utils/markdown';
+import { renderMarkdown, renderMarkdownPreview, renderUserMessageHtml } from '../../utils/markdown';
 
 describe('renderMarkdown', () => {
   it('renders inline and block KaTeX math', () => {
@@ -26,6 +26,31 @@ describe('renderMarkdown', () => {
     const html = renderMarkdown('GDP ==平减指数==');
 
     expect(html).toContain('<mark>平减指数</mark>');
+  });
+
+  it('renders keycap emoji sequences as font-independent styled spans', () => {
+    const html = renderMarkdown('键帽 1️⃣2️⃣3️⃣ #️⃣ *️⃣ 测试');
+
+    expect(html).toContain('keycap-emoji');
+    expect(html).not.toContain('\u20E3');
+    expect(html).toContain('>1</span>');
+    // 占位符不残留
+    expect(html).not.toContain('\uE000');
+  });
+
+  it('leaves plain digits untouched by keycap protection', () => {
+    const html = renderMarkdown('glm5.3 版本 123 # 注释');
+
+    expect(html).not.toContain('keycap-emoji');
+    expect(html).toContain('glm5.3');
+  });
+
+  it('renders user message keycap emoji as styled spans', () => {
+    const html = renderUserMessageHtml('1️⃣ ok');
+
+    expect(html).toContain('keycap-emoji');
+    expect(html).not.toContain('\u20E3');
+    expect(html).toContain('>1</span>');
   });
 
   it('renders whitelisted Obsidian background span as a safe mark', () => {

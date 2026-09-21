@@ -648,8 +648,31 @@ export function getPreviewMd(): MarkdownItInstance {
   return _previewMd;
 }
 
+/**
+ * 键帽 emoji（1️⃣）渲染保护。
+ *
+ * 键帽 emoji 序列 = [0-9#*] + U+FE0F(可选) + U+20E3(组合键帽)，需要 base 与组合符
+ * 在同一字体中合成。内置 Noto Color Emoji 的 unicode-range 已排除 ASCII 数字
+ * （否则全应用数字被 emoji 字体吞掉渲染成超宽字形），序列跨字体合成失败会渲染成空白。
+ * 方案：渲染前用私有区占位符保护序列（不被 markdown 解析/转义破坏），渲染后替换为
+ * CSS 圆框数字，视觉等同键帽 emoji 且不依赖任何字体。
+ */
+const KEYCAP_SEQ_RE = /([0-9#*])\uFE0F?\u20E3/g;
+const KEYCAP_OPEN = '\uE000';
+const KEYCAP_CLOSE = '\uE001';
+const keycapSpanHtml = (base: string) =>
+  `<span class="keycap-emoji" style="display:inline-block;min-width:1.05em;padding:0 0.14em;margin:0 1px;border:1px solid currentColor;border-radius:0.18em;font-size:0.82em;line-height:1.3;text-align:center;vertical-align:0.08em">${base}</span>`;
+
+function protectKeycapSequences(src: string): string {
+  return src.replace(KEYCAP_SEQ_RE, (_, base) => `${KEYCAP_OPEN}${base}${KEYCAP_CLOSE}`);
+}
+
+function restoreKeycapSequences(html: string): string {
+  return html.replace(new RegExp(`${KEYCAP_OPEN}([0-9#*])${KEYCAP_CLOSE}`, 'g'), (_, base) => keycapSpanHtml(base));
+}
+
 export function renderMarkdown(src: string): string {
-  return getMd().render(src);
+  return restoreKeycapSequences(getMd().render(protectKeycapSequences(src)));
 }
 
 /**
@@ -658,12 +681,17 @@ export function renderMarkdown(src: string): string {
  * ~~x~~ / **x** / `x` 等字符会在显示层“消失”，用户无法核对实际发送内容。
  */
 export function renderUserMessageHtml(src: string): string {
-  return `<p>${escapeHtml(src).replace(/\n/g, '<br>')}</p>`;
+  // 文本已转义，键帽序列字符（数字/FE0F/20E3）不受 escapeHtml 影响，可直接替换
+  const body = escapeHtml(src)
+    .replace(KEYCAP_SEQ_RE, (_, base) => keycapSpanHtml(base))
+    .replace(/\n/g, '<br>');
+  return `<p>${body}</p>`;
 }
 
 export function renderMarkdownPreview(src: string, options: MarkdownPreviewOptions = {}): string {
   try {
-    return sanitizeMarkdownPreviewHtml(getPreviewMd().render(src, buildMarkdownEnv(options)));
+    // 占位符在 sanitize 时作为纯文本存活，restore 放在 sanitize 之后避免 span 被剥样式
+    return restoreKeycapSequences(sanitizeMarkdownPreviewHtml(getPreviewMd().render(protectKeycapSequences(src), buildMarkdownEnv(options))));
   } catch (err) {
     if (process.env.NODE_ENV !== 'production') {
       console.warn('[markdown] preview sanitizer failed:', err);
